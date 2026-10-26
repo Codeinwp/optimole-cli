@@ -449,19 +449,45 @@ func TestRunScopedKey(t *testing.T) {
 	if out.Uploaded != 2 {
 		t.Fatalf("granted folder: %+v", out)
 	}
-	// Into the root: 403 for the destination, sent once.
+	// Into the root: 403 folder_required for the destination, sent once.
 	before := srv.Count(testserver.RouteCreate)
 	results, out := run(t, context.Background(), srv, scoped, root, PlanOptions{}, Runner{})
 	if out.Failed != 2 || out.NotAttempted != 0 || srv.Count(testserver.RouteCreate)-before != 1 {
 		t.Fatalf("root: %+v", out)
 	}
-	if !strings.Contains(results["b.jpg"].Err.Error(), "HTTP 403") {
+	var apiErr *api.Error
+	if msg := results["b.jpg"].Err.Error(); !errors.As(results["b.jpg"].Err, &apiErr) || apiErr.Code != api.CodeFolderRequired || !strings.Contains(msg, "pass --folder") {
 		t.Fatalf("b.jpg = %v", results["b.jpg"].Err)
 	}
 	// Into a folder it was not granted: the same 422 as a missing folder.
 	_, out = run(t, context.Background(), srv, scoped, root, PlanOptions{Folder: "Private"}, Runner{})
 	if out.Failed != 2 {
 		t.Fatalf("private: %+v", out)
+	}
+	// Creating folders: 403 folder_creation_forbidden, once per destination.
+	writeBytes(t, root, "new/c.jpg", []byte("x"))
+	before = srv.Count(testserver.RouteCreate)
+	results, out = run(t, context.Background(), srv, scoped, root, PlanOptions{Folder: "Shared"}, Runner{CreateFolders: true, Concurrency: 1})
+	if out.Failed != 3 || out.NotAttempted != 0 || srv.Count(testserver.RouteCreate)-before != 2 {
+		t.Fatalf("create folders: %+v, creates %d", out, srv.Count(testserver.RouteCreate)-before)
+	}
+	if msg := results["new/c.jpg"].Err.Error(); !strings.Contains(msg, "folder_creation_forbidden") || !strings.Contains(msg, "drop --create-folders") {
+		t.Fatalf("new/c.jpg = %v", msg)
+	}
+}
+
+// TestRunOther403StopsTheRun: a 403 that is not about the destination (an
+// inactive plan, a key without upload rights) holds for every file.
+func TestRunOther403StopsTheRun(t *testing.T) {
+	srv := testserver.New(t)
+	srv.Inject(testserver.RouteCreate, testserver.Response{Status: 403, Body: `{"message":"Active application required. Please ensure your subscription is active."}`})
+	root := t.TempDir()
+	writeBytes(t, root, "a.jpg", []byte("x"))
+	writeBytes(t, root, "b.jpg", []byte("x"))
+	writeBytes(t, root, "sub/c.jpg", []byte("x"))
+	_, out := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{}, Runner{Concurrency: 1})
+	if out.Failed != 3 || out.NotAttempted != 2 || srv.Count(testserver.RouteCreate) != 1 {
+		t.Fatalf("outcome = %+v, creates = %d", out, srv.Count(testserver.RouteCreate))
 	}
 }
 

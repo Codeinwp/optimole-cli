@@ -19,6 +19,10 @@ const (
 	CodeUploadServiceUnavailable = "upload_service_unavailable"
 	CodeUploadNotFound           = "upload_not_found"
 	CodeUploadSizeMismatch       = "upload_size_mismatch"
+	// CodeFolderRequired: a folder-scoped key named no folder.
+	CodeFolderRequired = "folder_required"
+	// CodeFolderCreationForbidden: a folder-scoped key asked to create folders.
+	CodeFolderCreationForbidden = "folder_creation_forbidden"
 )
 
 // Error is a non-2xx answer from the dashboard API.

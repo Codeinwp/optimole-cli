@@ -46,8 +46,8 @@ The key is never printed: it is removed from every error message, and it is only
 the storage URL the file bytes go to.
 
 **Folder-scoped keys** (the ones starting with `optml-s`) work for uploads into the folders they were
-granted (and their subfolders): always pass `--folder` (or `--folder-id`). They cannot create folders, upload
-into the library root, or list folders.
+granted (and their subfolders): always pass `--folder` (or `--folder-id`). They cannot create folders
+(`folder_creation_forbidden`), upload into the library root (`folder_required`), or list folders.
 
 The API base URL defaults to `https://dashboard.optimole.com/api`; override it with `--api-url` or
 `OPTIMOLE_API_URL` (for example `https://staging-dashboard.optimole.com/api`). Only `https` URLs are
@@ -110,12 +110,18 @@ from the completion answer is printed.
   ```
 
 - Folder names match case-insensitively (`campaigns` finds `Campaigns`); spaces around each name are
-  trimmed; leading and trailing slashes in `--folder` are ignored. A path has at most 20 levels and each name
+  trimmed; leading and trailing slashes in `--folder` are ignored (the server trims them too). A path has at most 20 levels and each name
   at most 255 characters.
 - Hidden entries (names starting with `.`) inside directories are ignored unless `--include-hidden`; a file
   you name explicitly is always considered.
-- Symbolic links are never followed, including one named on the command line; they are reported as skipped.
-- Nothing is uploaded twice when the same file is named twice.
+- Symbolic links are never followed, including one named on the command line (with or without a trailing
+  `/`); they are reported as skipped.
+- Each file is checked again right before it is sent: it must still be the same regular file, with the same
+  size, that was listed. A file or directory swapped for a symlink (or anything else) in the meantime fails
+  instead of uploading whatever the path now points to.
+- Nothing is uploaded twice: files are compared by identity, so the same file named twice, a case alias
+  (`a.jpg` and `A.JPG` on a case-insensitive disk) or a path through a symlinked parent counts once. Hard
+  links to one file count once as well.
 
 #### What gets skipped
 
@@ -144,20 +150,32 @@ returned. With `--create-folders`, destinations that would create the same missi
 `New/b` both create `New`) also start one after the other until that parent exists. This keeps parallel
 requests from creating the same folder twice.
 
-If the server says a destination folder is invalid (missing, or not granted to a scoped key), the other files
-for that folder are marked failed without more requests. An invalid key or a full account
-(`upload_limit_reached`) stops the run; the files not yet sent are reported as not attempted.
+If the server refuses a destination (a missing folder or one not granted to a scoped key, `folder_required`,
+`folder_creation_forbidden`), the other files for it are marked failed without more requests. An invalid key,
+a full account (`upload_limit_reached`) or any other `403` (such as an inactive plan) stops the run; the files
+not yet sent are reported as not attempted.
 
 #### Retries
 
-- API calls are retried on `429` (waiting as long as `Retry-After` says), `502`, `503`, `504` and network
-  errors, with capped exponential backoff and jitter, up to 4 attempts.
-- If the storage `PUT` fails with `403` (expired or mismatched signature), a `5xx` or a network error, the file
-  is retried once from the start, with a new asset. Abandoned assets are cleaned up by the server.
-- Validation errors (`4xx`) are never retried; the server's message, field errors and code are shown.
+All waits use capped exponential backoff with jitter (or the `Retry-After` delay), up to 4 attempts.
 
-Ctrl-C stops the run: uploads in flight are cancelled and the summary is still printed. Press it again to quit
-immediately.
+- **Reserving an asset** (`POST /api/assets`) is repeated only when the server cannot have reserved one: on
+  `429`, on `503 upload_service_unavailable`, and when the connection failed before the request was sent. A
+  `502`/`504`, another `503` or a connection lost after sending fails the file, because a second reservation
+  could end up published as a duplicate.
+- **The storage `PUT`** is repeated to the *same* URL on a network error or a `5xx` while the URL is
+  unexpired (the signature pins the asset, size and type, so this is harmless). Only a `403` (expired or
+  mismatched signature) or an expired URL leads to one new reservation; if an earlier `PUT` may have
+  stored the bytes, the CLI first asks the server to complete the original asset. Redirects from storage
+  are refused, never followed.
+- **Completion and folder listing** are repeated on `429`, `502`, `503`, `504` and network errors.
+- Validation errors (other `4xx`) are never retried; the server's message, field errors and code are shown.
+
+Ctrl-C stops the run, including while files are being listed or a dry run is printing: uploads in flight
+are cancelled and the summary is still printed. Press it again to quit immediately.
+
+If the output itself cannot be written (a full disk, for example), no new uploads start and the command exits
+1: results that cannot be recorded are lost results.
 
 #### Output
 
@@ -199,7 +217,9 @@ Folder-scoped keys cannot list folders (the API answers 403); `upload --folder P
 
 ### `optimole login`, `optimole logout`
 
-`login` reads the key from stdin: type or paste it at the prompt, or pipe it (`optimole login < key.txt`).
+`login` reads the key from stdin: type or paste it at the prompt, or pipe it (`optimole login < key.txt`;
+the first non-blank line is used). It never takes the key as an argument, and does not repeat one given that
+way.
 It checks the key with a cheap authenticated call before saving it; a folder-scoped key is accepted even though
 it cannot list folders. `logout` deletes the saved key.
 
@@ -212,13 +232,15 @@ Prints the version, commit and build date.
 | Code | Meaning |
 |---|---|
 | 0 | Every selected file was uploaded (skipped files do not count). |
-| 1 | At least one file failed, or there was nothing to upload. |
+| 1 | At least one file failed, there was nothing to upload, or the output could not be written. |
 | 2 | Usage or configuration error (bad flags, a directory without `-r`, missing key, non-https URL). Nothing was uploaded. |
 | 130 | Interrupted with Ctrl-C. |
 
 ## Limits
 
 - 100 MB per file; the account's plan sets an upload limit (`upload_limit_reached` once it is reached).
+  Reservations count towards it until they are completed or settled by the server's hourly cleanup, which
+  is another reason the CLI avoids reserving an asset twice for one file.
 - The API allows 300 requests per minute per account; each file takes 2 API requests plus the storage upload,
   so very large batches may see `429` answers, which the CLI waits out.
 - A presigned upload URL is valid for 15 minutes.

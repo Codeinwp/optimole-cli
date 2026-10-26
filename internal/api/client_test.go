@@ -112,6 +112,34 @@ func TestThreeStepHappyPath(t *testing.T) {
 	}
 }
 
+// TestImagesSignContentDisposition: for images the server signs
+// Content-Disposition: attachment too, and storage refuses a PUT without it.
+func TestImagesSignContentDisposition(t *testing.T) {
+	srv := testserver.New(t)
+	c, _ := newTestClient(t, srv.URL)
+	ctx := context.Background()
+	created, err := c.CreateAsset(ctx, CreateAssetRequest{Filename: "a.png", Size: 3, FolderPath: "/Brand/Logos/", CreateFolders: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.FolderPath(created.Asset.FolderID.Value); got != "Brand/Logos" {
+		t.Fatalf("folder = %q", got)
+	}
+	target, _ := created.Target()
+	if target.Headers["Content-Disposition"] != "attachment" || target.Headers["Content-Type"] != "image/png" {
+		t.Fatalf("headers = %v", target.Headers)
+	}
+	partial := target
+	partial.Headers = map[string]string{"Content-Type": "image/png"}
+	var se *StorageError
+	if err := c.PutObject(ctx, partial, strings.NewReader("abc"), 3); !errors.As(err, &se) || se.StatusCode != 403 {
+		t.Fatalf("PUT without Content-Disposition: %v", err)
+	}
+	if err := c.PutObject(ctx, target, strings.NewReader("abc"), 3); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPutObjectRejectsWrongSizeOrType(t *testing.T) {
 	srv := testserver.New(t)
 	c, _ := newTestClient(t, srv.URL)

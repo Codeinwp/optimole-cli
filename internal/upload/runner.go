@@ -98,12 +98,12 @@ type finished struct {
 //   - if the server placed it in a folder (success, or a failure after the
 //     asset was created), the rest run in parallel with that folder ID;
 //   - if the server refused the destination (invalid folder, or a 403
-//     without upload_limit_reached), the rest fail with the same error,
-//     without more requests;
+//     folder_required / folder_creation_forbidden), the rest fail with the
+//     same error, without more requests;
 //   - otherwise the next file becomes the leader.
 //
-// A 401 or upload_limit_reached stops the whole run; files not yet sent are
-// reported as not attempted. Cancelling ctx does the same.
+// A 401, upload_limit_reached or any other 403 stops the whole run; files
+// not yet sent are reported as not attempted. Cancelling ctx does the same.
 func (r *Runner) Run(ctx context.Context, items []Item) Outcome {
 	conc := r.Concurrency
 	if conc <= 0 {
@@ -290,13 +290,21 @@ func (g *folderGate) finish(t task, res Result) {
 	}
 }
 
-// fatal reports errors that make every other upload fail too.
+// fatal reports errors that make every other upload fail too: a rejected
+// key, a full account, or a 403 that is not about the destination (such as
+// a key without upload rights or an inactive plan).
 func fatal(err error) bool {
 	var apiErr *api.Error
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	return apiErr.StatusCode == http.StatusUnauthorized || apiErr.Code == api.CodeUploadLimitReached
+	switch apiErr.StatusCode {
+	case http.StatusUnauthorized:
+		return true
+	case http.StatusForbidden:
+		return !destinationRefused(err)
+	}
+	return false
 }
 
 // destinationRefused reports errors about the destination rather than the
@@ -310,7 +318,7 @@ func destinationRefused(err error) bool {
 	case http.StatusUnprocessableEntity:
 		return apiErr.HasField("folder_path") || apiErr.HasField("folder_id")
 	case http.StatusForbidden:
-		return apiErr.Code != api.CodeUploadLimitReached
+		return apiErr.Code == api.CodeFolderRequired || apiErr.Code == api.CodeFolderCreationForbidden
 	}
 	return false
 }
@@ -451,9 +459,16 @@ func (e *HintError) Unwrap() error { return e.Err }
 
 func (r *Runner) withHint(err error, it Item) error {
 	var apiErr *api.Error
-	if r.CreateFolders || it.Dest.Path == "" || !errors.As(err, &apiErr) ||
-		apiErr.StatusCode != http.StatusUnprocessableEntity || !apiErr.HasField("folder_path") {
+	if !errors.As(err, &apiErr) {
 		return err
 	}
-	return &HintError{Err: err, Hint: "if the folder does not exist yet, add --create-folders to create it (full-access keys only)"}
+	switch {
+	case apiErr.StatusCode == http.StatusUnprocessableEntity && apiErr.HasField("folder_path") && !r.CreateFolders && it.Dest.Path != "":
+		return &HintError{Err: err, Hint: "if the folder does not exist yet, add --create-folders to create it (full-access keys only)"}
+	case apiErr.Code == api.CodeFolderCreationForbidden:
+		return &HintError{Err: err, Hint: "folder-scoped keys cannot create folders; drop --create-folders and upload into folders the key was granted"}
+	case apiErr.Code == api.CodeFolderRequired:
+		return &HintError{Err: err, Hint: "folder-scoped keys must upload into a folder they were granted; pass --folder"}
+	}
+	return err
 }

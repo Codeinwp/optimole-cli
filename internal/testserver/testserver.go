@@ -446,11 +446,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	create := body.CreateFolders != nil && *body.CreateFolders
 	if key.Scoped && create {
-		status = writeJSON(w, http.StatusForbidden, map[string]string{"message": "Folder-scoped API keys cannot create folders."})
+		status = writeJSON(w, http.StatusForbidden, map[string]string{"code": "folder_creation_forbidden", "message": "Folder-scoped API keys cannot create folders."})
 		return
 	}
 	if key.Scoped && body.FolderID == nil && body.FolderPath == nil {
-		status = writeJSON(w, http.StatusForbidden, map[string]string{"message": "Folder-scoped API keys must upload into a folder."})
+		status = writeJSON(w, http.StatusForbidden, map[string]string{"code": "folder_required", "message": "Folder-scoped API keys must upload into a folder."})
 		return
 	}
 	s.mu.Lock()
@@ -510,7 +510,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"uploadUrl": uploadURL,
 		"upload": map[string]any{
 			"url": uploadURL, "method": "PUT",
-			"headers":    map[string]string{"Content-Type": ct},
+			"headers":    signedHeaders(ct),
 			"expires_at": time.Now().Add(s.uploadTTL()).UTC().Format(time.RFC3339),
 		},
 	})
@@ -521,6 +521,16 @@ func (s *Server) uploadTTL() time.Duration {
 		return 15 * time.Minute
 	}
 	return s.UploadExpiresIn
+}
+
+// signedHeaders are the headers the presigned URL signs: the type, and for
+// images Content-Disposition: attachment.
+func signedHeaders(contentType string) map[string]string {
+	h := map[string]string{"Content-Type": contentType}
+	if strings.HasPrefix(contentType, "image/") {
+		h["Content-Disposition"] = "attachment"
+	}
+	return h
 }
 
 func firstNonEmpty(cond bool, a, b string) string {
@@ -680,8 +690,8 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	case r.Method != http.MethodPut:
 		s3Error("SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided.")
 		return
-	case r.Header.Get("Content-Type") != ct:
-		s3Error("SignatureDoesNotMatch", "Content-Type does not match the signed value.")
+	case !headersMatch(r.Header, signedHeaders(ct)):
+		s3Error("SignatureDoesNotMatch", "A signed header is missing or does not match the signed value.")
 		return
 	case r.ContentLength != size:
 		s3Error("SignatureDoesNotMatch", "Content-Length does not match the signed value.")
@@ -704,6 +714,15 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", `"`+a.SHA256[:32]+`"`)
 	w.WriteHeader(http.StatusOK)
 	status = http.StatusOK
+}
+
+func headersMatch(got http.Header, want map[string]string) bool {
+	for k, v := range want {
+		if got.Get(k) != v {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleFolders(w http.ResponseWriter, r *http.Request) {
@@ -828,7 +847,8 @@ func (s *Server) pathLocked(id int64) string {
 // resolvePath finds or (with create) creates a folder path. Creation is
 // deliberately not atomic: see FolderCreateDelay.
 func (s *Server) resolvePath(p string, create bool) (int64, error) {
-	segs := strings.Split(p, "/")
+	// The server trims leading and trailing slashes.
+	segs := strings.Split(strings.Trim(p, "/"), "/")
 	if len(segs) > 20 {
 		return 0, fmt.Errorf("too deep")
 	}
