@@ -235,6 +235,8 @@ func TestRunStorageFailures(t *testing.T) {
 		{"stored, then the connection dropped", []testserver.Response{{CommitThenClose: true}}, 1, 2, true},
 		{"500 once", []testserver.Response{{Status: 500, Body: "<Error><Code>InternalError</Code></Error>"}}, 1, 2, true},
 		{"network errors on every attempt", []testserver.Response{{CloseConn: true}, {CloseConn: true}, {CloseConn: true}, {CloseConn: true}}, 1, 4, false},
+		// Every answer was lost, but the bytes were stored: completing shows it.
+		{"stored every time, answers lost", []testserver.Response{{CommitThenClose: true}, {CommitThenClose: true}, {CommitThenClose: true}, {CommitThenClose: true}}, 1, 4, true},
 		// Storage refused the URL: one new asset.
 		{"403 once", []testserver.Response{denied}, 2, 2, true},
 		{"403 twice", []testserver.Response{denied, denied}, 2, 2, false},
@@ -260,7 +262,7 @@ func TestRunStorageFailures(t *testing.T) {
 				return
 			}
 			var se *api.StorageError
-			if res.Status != StatusFailed || !errors.As(res.Err, &se) || srv.Count(testserver.RouteComplete) != 0 {
+			if res.Status != StatusFailed || !errors.As(res.Err, &se) || len(srv.CompletedByName()) != 0 {
 				t.Fatalf("result = %+v", res)
 			}
 		})

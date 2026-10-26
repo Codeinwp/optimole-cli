@@ -165,9 +165,10 @@ All waits use capped exponential backoff with jitter (or the `Retry-After` delay
   could end up published as a duplicate.
 - **The storage `PUT`** is repeated to the *same* URL on a network error or a `5xx` while the URL is
   unexpired (the signature pins the asset, size and type, so this is harmless). Only a `403` (expired or
-  mismatched signature) or an expired URL leads to one new reservation; if an earlier `PUT` may have
-  stored the bytes, the CLI first asks the server to complete the original asset. Redirects from storage
-  are refused, never followed.
+  mismatched signature) or an expired URL leads to one new reservation. Whenever an earlier `PUT` may have
+  stored the bytes (its answer was lost), the CLI asks the server to complete the original asset before
+  reserving another or giving up, so the file is neither duplicated nor reported failed by mistake.
+  Redirects from storage are refused, never followed.
 - **Completion and folder listing** are repeated on `429`, `502`, `503`, `504` and network errors.
 - Validation errors (other `4xx`) are never retried; the server's message, field errors and code are shown.
 

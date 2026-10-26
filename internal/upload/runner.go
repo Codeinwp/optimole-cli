@@ -356,7 +356,18 @@ func (r *Runner) uploadOne(ctx context.Context, t task) Result {
 			return res
 		}
 		var se *api.StorageError
-		if !errors.As(err, &se) || !se.NeedsNewAsset() || reservation == 2 {
+		if !errors.As(err, &se) {
+			return res
+		}
+		if !se.NeedsNewAsset() || reservation == 2 {
+			if se.Uncertain {
+				// Retries ran out, but an attempt may have stored the bytes;
+				// the server's cleanup would publish them while we report a
+				// failure. Completing settles which it is.
+				if asset, cerr := r.Client.CompleteAsset(ctx, key, dims); cerr == nil {
+					res.Status, res.URL, res.Err = StatusUploaded, asset.URL, nil
+				}
+			}
 			return res
 		}
 		if se.Uncertain {
