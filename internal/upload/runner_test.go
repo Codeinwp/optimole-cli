@@ -355,6 +355,73 @@ func TestRunExpiredAfterUncertainPut(t *testing.T) {
 	})
 }
 
+// uncertainPut sets up the two ways a PUT can end uncertain: the URL expired
+// after a lost answer (a new asset would follow), or every same-URL retry
+// lost its answer (the file would fail).
+var uncertainPut = map[string]func(srv *testserver.Server){
+	"before a new reservation": func(srv *testserver.Server) {
+		srv.UploadExpiresIn = -time.Minute
+		srv.Inject(testserver.RoutePut, testserver.Response{CloseConn: true})
+	},
+	"after the retries ran out": func(srv *testserver.Server) {
+		for range api.MaxAttempts {
+			srv.Inject(testserver.RoutePut, testserver.Response{CloseConn: true})
+		}
+	},
+}
+
+// TestRunProbeErrorsKeepTheirType: a probe answered with a 403 that is not
+// about the destination must still stop the run and keep its code.
+func TestRunProbeErrorsKeepTheirType(t *testing.T) {
+	for name, setup := range uncertainPut {
+		t.Run(name, func(t *testing.T) {
+			srv := testserver.New(t)
+			setup(srv)
+			srv.Inject(testserver.RouteComplete, testserver.Response{Status: 403, Body: `{"code":"application_inactive","message":"Active application required."}`})
+			root := t.TempDir()
+			writeBytes(t, root, "a.jpg", []byte("abc"))
+			writeBytes(t, root, "b.jpg", []byte("abc"))
+			results, out := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{}, Runner{Concurrency: 1})
+			res := results["a.jpg"]
+			var apiErr *api.Error
+			var se *api.StorageError
+			if !errors.As(res.Err, &apiErr) || apiErr.StatusCode != 403 || apiErr.Code != "application_inactive" || !errors.As(res.Err, &se) {
+				t.Fatalf("a.jpg error = %v", res.Err)
+			}
+			if out.Stopped == nil || out.NotAttempted != 1 || !results["b.jpg"].NotAttempted {
+				t.Fatalf("outcome = %+v: the 403 did not stop the run", out)
+			}
+		})
+	}
+}
+
+// TestRunProbeCancellation: Ctrl-C during a probe reports the file as
+// interrupted, whichever branch probed.
+func TestRunProbeCancellation(t *testing.T) {
+	for name, setup := range uncertainPut {
+		t.Run(name, func(t *testing.T) {
+			srv := testserver.New(t)
+			setup(srv)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			srv.Hook = func(route testserver.Route, _ *http.Request) {
+				if route == testserver.RouteComplete {
+					cancel()
+				}
+			}
+			root := t.TempDir()
+			writeBytes(t, root, "a.jpg", []byte("abc"))
+			results, out := run(t, ctx, srv, testserver.DefaultKey, root, PlanOptions{}, Runner{})
+			if r := results["a.jpg"]; !errors.Is(r.Err, ErrInterrupted) || !out.Interrupted {
+				t.Fatalf("result = %+v, outcome = %+v", r, out)
+			}
+			if n := srv.Count(testserver.RouteCreate); n != 1 {
+				t.Fatalf("creates = %d", n)
+			}
+		})
+	}
+}
+
 // recordedSleeps records waits instead of sleeping.
 type recordedSleeps struct {
 	mu sync.Mutex

@@ -374,23 +374,14 @@ func (r *Runner) uploadOne(ctx context.Context, t task) Result {
 				// Retries ran out, but an attempt may have stored the bytes;
 				// the server's cleanup would publish them while we report a
 				// failure. Completing settles which it is.
-				if asset, _ := r.settle(ctx, key, dims); asset != nil {
-					res.Status, res.URL, res.Err = StatusUploaded, asset.URL, nil
-				}
+				r.settleInto(ctx, &res, err, key, dims)
 			}
 			return res
 		}
-		if se.Uncertain {
-			asset, perr := r.settle(ctx, key, dims)
-			if asset != nil {
-				res.Status, res.URL, res.Err = StatusUploaded, asset.URL, nil
-				return res
-			}
-			if perr != nil {
-				// Unknown whether the bytes landed: a new asset could be a duplicate.
-				res.Err = fmt.Errorf("%w; checking whether it was stored anyway: %v", err, perr)
-				return res
-			}
+		// A new asset could be a duplicate unless the probes show the
+		// bytes are not there.
+		if se.Uncertain && r.settleInto(ctx, &res, err, key, dims) {
+			return res
 		}
 	}
 	return res
@@ -419,6 +410,27 @@ func (r *Runner) settle(ctx context.Context, key string, dims *api.Dimensions) (
 		}
 	}
 	return nil, nil
+}
+
+// settleInto runs settle after the uncertain PUT failure putErr and records
+// the outcome in res: uploaded when the bytes are there; interrupted when the
+// context ended; otherwise, if a probe failed, putErr joined with that error,
+// which keeps its type (a 401 or 403 still stops the run, and its code still
+// reaches the JSON output). It reports whether res is final; false means the
+// bytes are not there and res is unchanged.
+func (r *Runner) settleInto(ctx context.Context, res *Result, putErr error, key string, dims *api.Dimensions) bool {
+	asset, err := r.settle(ctx, key, dims)
+	switch {
+	case asset != nil:
+		res.Status, res.URL, res.Err = StatusUploaded, asset.URL, nil
+	case ctx.Err() != nil:
+		res.Err = ErrInterrupted
+	case err != nil:
+		res.Err = fmt.Errorf("%w; checking whether it was stored anyway: %w", putErr, err)
+	default:
+		return false
+	}
+	return true
 }
 
 func (r *Runner) sleep(ctx context.Context, d time.Duration) error {
