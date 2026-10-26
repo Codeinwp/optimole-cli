@@ -1,0 +1,51 @@
+# GoReleaser v2. Run by .github/workflows/release.yml on v* tags only.
+# Local dry run: goreleaser release --snapshot --clean
+version: 2
+
+project_name: optimole
+
+builds:
+  - id: optimole
+    main: ./cmd/optimole
+    binary: optimole
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .ShortCommit }} -X main.date={{ .Date }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: optimole
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: Codeinwp
+    name: optimole-cli
+  # Tag pushes create a draft; a maintainer publishes it after a look.
+  draft: true
