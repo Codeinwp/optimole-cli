@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/png"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -216,18 +217,30 @@ func TestRunConcurrencyLimit(t *testing.T) {
 	}
 }
 
-func TestRunStorageFailuresRetryWholeFileOnce(t *testing.T) {
+func TestRunStorageFailures(t *testing.T) {
+	denied := testserver.Response{Status: 403, Body: "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>"}
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("the file was sent to the redirect target")
+	}))
+	defer other.Close()
 	cases := []struct {
 		name    string
 		inject  []testserver.Response
 		creates int
+		puts    int
 		ok      bool
 	}{
-		{"403 once", []testserver.Response{{Status: 403, Body: "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>"}}, 2, true},
-		{"network error once", []testserver.Response{{CloseConn: true}}, 2, true},
-		{"500 once", []testserver.Response{{Status: 500, Body: "<Error><Code>InternalError</Code></Error>"}}, 2, true},
-		{"403 twice", []testserver.Response{{Status: 403, Body: "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>"}, {Status: 403, Body: "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>"}}, 2, false},
-		{"400 is not retried", []testserver.Response{{Status: 400, Body: "<Error><Code>BadDigest</Code></Error>"}}, 1, false},
+		// The same URL is retried: the signature pins key, size and type.
+		{"network error once", []testserver.Response{{CloseConn: true}}, 1, 2, true},
+		{"stored, then the connection dropped", []testserver.Response{{CommitThenClose: true}}, 1, 2, true},
+		{"500 once", []testserver.Response{{Status: 500, Body: "<Error><Code>InternalError</Code></Error>"}}, 1, 2, true},
+		{"network errors on every attempt", []testserver.Response{{CloseConn: true}, {CloseConn: true}, {CloseConn: true}, {CloseConn: true}}, 1, 4, false},
+		// Storage refused the URL: one new asset.
+		{"403 once", []testserver.Response{denied}, 2, 2, true},
+		{"403 twice", []testserver.Response{denied, denied}, 2, 2, false},
+		// Neither.
+		{"400", []testserver.Response{{Status: 400, Body: "<Error><Code>BadDigest</Code></Error>"}}, 1, 1, false},
+		{"redirect", []testserver.Response{{Status: 307, Header: map[string]string{"Location": other.URL + "/x"}}}, 1, 1, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -236,22 +249,13 @@ func TestRunStorageFailuresRetryWholeFileOnce(t *testing.T) {
 			root := t.TempDir()
 			writeBytes(t, root, "a.jpg", []byte("abc"))
 			results, out := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{}, Runner{Concurrency: 1})
-			if n := srv.Count(testserver.RouteCreate); n != tc.creates {
-				t.Fatalf("creates = %d, want %d", n, tc.creates)
+			if c, p := srv.Count(testserver.RouteCreate), srv.Count(testserver.RoutePut); c != tc.creates || p != tc.puts {
+				t.Fatalf("creates = %d, PUTs = %d; want %d and %d", c, p, tc.creates, tc.puts)
 			}
 			res := results["a.jpg"]
 			if tc.ok {
-				if res.Status != StatusUploaded || out.Uploaded != 1 {
+				if res.Status != StatusUploaded || out.Uploaded != 1 || len(srv.CompletedByName()) != 1 {
 					t.Fatalf("result = %+v", res)
-				}
-				keys := map[string]bool{}
-				for _, e := range srv.Events() {
-					if e.Route == testserver.RouteCreate {
-						keys[e.Key] = true
-					}
-				}
-				if len(keys) != 2 {
-					t.Fatalf("the retry reused the asset: keys %v", keys)
 				}
 				return
 			}
@@ -261,6 +265,41 @@ func TestRunStorageFailuresRetryWholeFileOnce(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunExpiredAfterUncertainPut covers a PUT whose answer was lost and whose
+// URL then expired: the CLI asks the server whether the bytes arrived before
+// reserving a second asset, which the server's cleanup would also publish.
+func TestRunExpiredAfterUncertainPut(t *testing.T) {
+	t.Run("the bytes were stored", func(t *testing.T) {
+		srv := testserver.New(t)
+		srv.UploadExpiresIn = -time.Minute
+		srv.Inject(testserver.RoutePut, testserver.Response{CommitThenClose: true})
+		root := t.TempDir()
+		writeBytes(t, root, "a.jpg", []byte("abc"))
+		results, _ := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{}, Runner{})
+		if r := results["a.jpg"]; r.Status != StatusUploaded || r.URL == "" {
+			t.Fatalf("result = %+v", r)
+		}
+		if c := srv.Count(testserver.RouteCreate); c != 1 || len(srv.Assets()) != 1 {
+			t.Fatalf("creates = %d, assets = %d; want 1 and 1", c, len(srv.Assets()))
+		}
+	})
+	t.Run("the bytes were not stored", func(t *testing.T) {
+		srv := testserver.New(t)
+		srv.UploadExpiresIn = -time.Minute
+		srv.Inject(testserver.RoutePut, testserver.Response{CloseConn: true})
+		root := t.TempDir()
+		writeBytes(t, root, "a.jpg", []byte("abc"))
+		results, _ := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{}, Runner{})
+		if r := results["a.jpg"]; r.Status != StatusUploaded {
+			t.Fatalf("result = %+v", r)
+		}
+		// Completion said upload_not_found, so a second asset was safe.
+		if c := srv.Count(testserver.RouteCreate); c != 2 || len(srv.CompletedByName()) != 1 {
+			t.Fatalf("creates = %d, completed = %d", c, len(srv.CompletedByName()))
+		}
+	})
 }
 
 func TestRunCompletionErrors(t *testing.T) {
@@ -450,7 +489,7 @@ func TestRunFileChangedSinceListing(t *testing.T) {
 	var got Result
 	r := Runner{Client: newClient(t, srv, testserver.DefaultKey), OnResult: func(res Result) { got = res }}
 	r.Run(context.Background(), plan.Selected())
-	if got.Status != StatusFailed || !strings.Contains(got.Err.Error(), "empty file") || srv.Count(testserver.RouteCreate) != 0 {
+	if got.Status != StatusFailed || !strings.Contains(got.Err.Error(), "file changed since it was listed") || srv.Count(testserver.RouteCreate) != 0 {
 		t.Fatalf("result = %+v", got)
 	}
 }

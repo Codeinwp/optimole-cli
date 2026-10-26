@@ -124,7 +124,7 @@ func TestPutObjectRejectsWrongSizeOrType(t *testing.T) {
 	// Size differs from the signed one: storage answers 403.
 	err = c.PutObject(ctx, target, strings.NewReader("123456789"), 9)
 	var se *StorageError
-	if !errors.As(err, &se) || se.StatusCode != http.StatusForbidden || se.Code != "SignatureDoesNotMatch" || !se.Retryable() {
+	if !errors.As(err, &se) || se.StatusCode != http.StatusForbidden || se.Code != "SignatureDoesNotMatch" || !se.NeedsNewAsset() || se.Attempts != 1 {
 		t.Fatalf("short body: err = %v", err)
 	}
 
@@ -199,9 +199,12 @@ func TestPutObjectStreams(t *testing.T) {
 }
 
 func TestPutObjectNeverSendsAPIKeyAndHidesSignature(t *testing.T) {
-	auth := make(chan string, 1)
+	var mu sync.Mutex
+	var auths []string
 	s3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth <- r.Header.Get("Authorization")
+		mu.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		mu.Unlock()
 		if hj, ok := w.(http.Hijacker); ok {
 			conn, _, _ := hj.Hijack()
 			conn.Close()
@@ -211,14 +214,113 @@ func TestPutObjectNeverSendsAPIKeyAndHidesSignature(t *testing.T) {
 	c, _ := newTestClient(t, "http://127.0.0.1:1/api")
 	err := c.PutObject(context.Background(), UploadTarget{URL: s3.URL + "/k?X-Amz-Signature=supersecretsig", Method: http.MethodPut}, strings.NewReader("abc"), 3)
 	var se *StorageError
-	if !errors.As(err, &se) || se.StatusCode != 0 || !se.Retryable() {
-		t.Fatalf("err = %v, want a network StorageError", err)
+	if !errors.As(err, &se) || se.StatusCode != 0 || se.NeedsNewAsset() || !se.Uncertain || se.Attempts != MaxAttempts {
+		t.Fatalf("err = %#v, want a network StorageError after %d attempts", err, MaxAttempts)
 	}
 	if strings.Contains(err.Error(), "supersecretsig") {
 		t.Fatalf("error leaks the presigned URL: %v", err)
 	}
-	if a := <-auth; a != "" {
-		t.Fatalf("storage request carried Authorization %q", a)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(auths) != MaxAttempts {
+		t.Fatalf("storage saw %d requests, want %d", len(auths), MaxAttempts)
+	}
+	for _, a := range auths {
+		if a != "" {
+			t.Fatalf("storage request carried Authorization %q", a)
+		}
+	}
+}
+
+// putAsset reserves an asset on the fake and returns the client and target.
+func putAsset(t *testing.T, srv *testserver.Server, size int64) (*Client, *sleeps, *CreateAssetResponse, UploadTarget) {
+	t.Helper()
+	c, sl := newTestClient(t, srv.URL)
+	created, err := c.CreateAsset(context.Background(), CreateAssetRequest{Filename: "a.txt", Size: size})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := created.Target()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, sl, created, target
+}
+
+func TestPutObjectRetriesTheSameURL(t *testing.T) {
+	cases := []struct {
+		name   string
+		inject []testserver.Response
+		puts   int
+	}{
+		{"stored, then the connection dropped", []testserver.Response{{CommitThenClose: true}}, 2},
+		{"no answer", []testserver.Response{{CloseConn: true}, {CloseConn: true}}, 3},
+		{"storage 500", []testserver.Response{{Status: 500, Body: "<Error><Code>InternalError</Code></Error>"}}, 2},
+		{"storage 503", []testserver.Response{{Status: 503, Body: "<Error><Code>SlowDown</Code></Error>"}}, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := testserver.New(t)
+			srv.Inject(testserver.RoutePut, tc.inject...)
+			c, sl, created, target := putAsset(t, srv, 3)
+			if err := c.PutObject(context.Background(), target, strings.NewReader("abc"), 3); err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range srv.Events() {
+				if e.Route == testserver.RoutePut && e.Key != created.Asset.Key {
+					t.Fatalf("PUT went to asset %s, want %s", e.Key, created.Asset.Key)
+				}
+			}
+			if n := srv.Count(testserver.RoutePut); n != tc.puts || len(sl.all()) != tc.puts-1 {
+				t.Fatalf("PUTs = %d, sleeps = %d; want %d PUTs", n, len(sl.all()), tc.puts)
+			}
+			if _, err := c.CompleteAsset(context.Background(), created.Asset.Key, nil); err != nil {
+				t.Fatal(err)
+			}
+			if n := srv.Count(testserver.RouteCreate); n != 1 {
+				t.Fatalf("creates = %d", n)
+			}
+		})
+	}
+}
+
+func TestPutObjectStopsWhenTheURLExpires(t *testing.T) {
+	srv := testserver.New(t)
+	srv.UploadExpiresIn = -time.Minute
+	srv.Inject(testserver.RoutePut, testserver.Response{CloseConn: true}, testserver.Response{CloseConn: true})
+	c, _, _, target := putAsset(t, srv, 3)
+	err := c.PutObject(context.Background(), target, strings.NewReader("abc"), 3)
+	var se *StorageError
+	if !errors.As(err, &se) || !se.Expired || !se.Uncertain || !se.NeedsNewAsset() || se.Attempts != 1 {
+		t.Fatalf("err = %#v", err)
+	}
+	if !strings.Contains(err.Error(), "the upload URL expired") {
+		t.Fatalf("error text = %q", err)
+	}
+	if n := srv.Count(testserver.RoutePut); n != 1 {
+		t.Fatalf("PUTs = %d, want 1 (the expired URL is not retried)", n)
+	}
+}
+
+func TestPutObjectRefusesRedirects(t *testing.T) {
+	var elsewhere atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhere.Add(1)
+		io.Copy(io.Discard, r.Body)
+	}))
+	defer other.Close()
+	for _, status := range []int{301, 302, 307, 308} {
+		srv := testserver.New(t)
+		srv.Inject(testserver.RoutePut, testserver.Response{Status: status, Header: map[string]string{"Location": other.URL + "/bucket/x"}})
+		c, _, _, target := putAsset(t, srv, 3)
+		err := c.PutObject(context.Background(), target, strings.NewReader("abc"), 3)
+		var se *StorageError
+		if !errors.As(err, &se) || se.StatusCode != status || se.NeedsNewAsset() || se.Uncertain || se.Attempts != 1 {
+			t.Fatalf("%d: err = %#v", status, err)
+		}
+	}
+	if n := elsewhere.Load(); n != 0 {
+		t.Fatalf("the file was sent to the redirect target %d times", n)
 	}
 }
 

@@ -47,6 +47,10 @@ type Response struct {
 	Header map[string]string
 	// CloseConn drops the connection without an answer (a network error).
 	CloseConn bool
+	// CommitThenClose handles the request normally (reserving the asset or
+	// storing the bytes) and then drops the connection instead of answering:
+	// the client cannot tell whether the request took effect.
+	CommitThenClose bool
 }
 
 // Key is an API key the fake accepts.
@@ -110,6 +114,9 @@ type Server struct {
 	CompleteDelay time.Duration
 	// PutDelay slows down storage uploads.
 	PutDelay time.Duration
+	// UploadExpiresIn sets the expires_at of new upload URLs (default 15
+	// minutes; negative values give URLs that are already expired).
+	UploadExpiresIn time.Duration
 	// Hook, when set, runs at the start of every request (outside the lock).
 	Hook func(route Route, r *http.Request)
 
@@ -321,6 +328,20 @@ func writeInjected(w http.ResponseWriter, resp *Response) int {
 	return resp.Status
 }
 
+// commitThenClose swaps w for a recorder; the returned func drops the real
+// connection instead of sending the recorded answer.
+func commitThenClose(w http.ResponseWriter) (http.ResponseWriter, func()) {
+	return httptest.NewRecorder(), func() {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				conn.Close()
+				return
+			}
+		}
+		panic(http.ErrAbortHandler)
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) int {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -361,6 +382,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ev, injected := s.begin(RouteCreate, r)
 	status := 0
 	defer func() { s.finish(ev, status) }()
+	if injected != nil && injected.CommitThenClose {
+		var drop func()
+		w, drop = commitThenClose(w)
+		defer drop()
+		injected = nil
+	}
 
 	var body struct {
 		Filename      *string `json:"filename"`
@@ -484,9 +511,16 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"upload": map[string]any{
 			"url": uploadURL, "method": "PUT",
 			"headers":    map[string]string{"Content-Type": ct},
-			"expires_at": time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339),
+			"expires_at": time.Now().Add(s.uploadTTL()).UTC().Format(time.RFC3339),
 		},
 	})
+}
+
+func (s *Server) uploadTTL() time.Duration {
+	if s.UploadExpiresIn == 0 {
+		return 15 * time.Minute
+	}
+	return s.UploadExpiresIn
 }
 
 func firstNonEmpty(cond bool, a, b string) string {
@@ -502,6 +536,12 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	ev, injected := s.begin(RouteComplete, r)
 	status := 0
 	defer func() { s.finish(ev, status) }()
+	if injected != nil && injected.CommitThenClose {
+		var drop func()
+		w, drop = commitThenClose(w)
+		defer drop()
+		injected = nil
+	}
 	m := completionPath.FindStringSubmatch(r.URL.Path)
 	if m != nil {
 		ev.Key = m[1]
@@ -589,6 +629,12 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	ev, injected := s.begin(RoutePut, r)
 	status := 0
 	defer func() { s.finish(ev, status) }()
+	if injected != nil && injected.CommitThenClose {
+		var drop func()
+		w, drop = commitThenClose(w)
+		defer drop()
+		injected = nil
+	}
 
 	s.mu.Lock()
 	s.inflightPut++

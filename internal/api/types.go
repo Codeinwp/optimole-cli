@@ -43,6 +43,9 @@ type CreateAssetResponse struct {
 	Upload    *UploadInstructions `json:"upload"`
 }
 
+// defaultUploadTTL is assumed when the server gives no expires_at.
+const defaultUploadTTL = 14 * time.Minute
+
 // UploadTarget is a validated presigned storage request.
 type UploadTarget struct {
 	URL       string
@@ -68,6 +71,11 @@ func (r *CreateAssetResponse) Target() (UploadTarget, error) {
 				t.ExpiresAt = ts
 			}
 		}
+	}
+	if t.ExpiresAt.IsZero() {
+		// The contract's 15 minutes, less a margin, counted from now (the
+		// target is read right after the reservation).
+		t.ExpiresAt = time.Now().Add(defaultUploadTTL)
 	}
 	if t.URL == "" {
 		return UploadTarget{}, errors.New("create asset: the server did not return an upload URL")

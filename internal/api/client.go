@@ -107,8 +107,12 @@ func New(opts Options) (*Client, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		// No overall timeout: a 100 MB body can take a while. The context and
-		// the transport's header timeout bound it instead.
-		storage:   &http.Client{Transport: transport},
+		// the transport's header timeout bound it instead. Redirects are
+		// refused: following one would replay the file to another host.
+		storage: &http.Client{
+			Transport:     transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		sleep:     sleep,
 		now:       time.Now,
 		baseDelay: defaultBaseDelay,
@@ -168,7 +172,15 @@ func (c *Client) CreateAsset(ctx context.Context, req CreateAssetRequest) (*Crea
 }
 
 // PutObject streams exactly size bytes from r to the presigned URL, with
-// every header the server signed. It never sends the API key.
+// every header the server signed. It never sends the API key and never
+// follows a redirect.
+//
+// A network error or a 5xx is retried against the same URL while it is
+// unexpired, up to MaxAttempts: the signature pins the key, size and type, so
+// sending the bytes again is harmless, whereas a new reservation could publish
+// a duplicate. The returned *StorageError says whether an earlier attempt may
+// have stored the bytes (Uncertain) and whether retrying stopped because the
+// URL expired (Expired).
 func (c *Client) PutObject(ctx context.Context, t UploadTarget, r io.ReaderAt, size int64) error {
 	u, err := checkURL(t.URL)
 	if err != nil {
@@ -177,14 +189,7 @@ func (c *Client) PutObject(ctx context.Context, t UploadTarget, r io.ReaderAt, s
 	if t.Method != "" && t.Method != http.MethodPut {
 		return &StorageError{Err: fmt.Errorf("unsupported upload method %q", t.Method)}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), io.NewSectionReader(r, 0, size))
-	if err != nil {
-		return &StorageError{Err: stripURL(err)}
-	}
-	req.ContentLength = size
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(io.NewSectionReader(r, 0, size)), nil
-	}
+	header := http.Header{}
 	for k, v := range t.Headers {
 		switch http.CanonicalHeaderKey(k) {
 		case "Content-Length":
@@ -195,22 +200,70 @@ func (c *Client) PutObject(ctx context.Context, t UploadTarget, r io.ReaderAt, s
 			// The URL names the storage host; a header must not send the bytes elsewhere.
 			continue
 		default:
-			req.Header.Set(k, v)
+			header.Set(k, v)
 		}
 	}
-	req.Header.Set("User-Agent", c.userAgent)
+	header.Set("User-Agent", c.userAgent)
 
-	resp, err := c.storage.Do(req)
-	if err != nil {
+	uncertain := false
+	var last *StorageError
+	for attempt := 1; attempt <= MaxAttempts; attempt++ {
+		if attempt > 1 {
+			if err := c.sleep(ctx, c.backoff(attempt-1)); err != nil {
+				return err
+			}
+			if !t.ExpiresAt.IsZero() && !c.now().Before(t.ExpiresAt) {
+				last.Expired = true
+				break
+			}
+		}
+		err := c.putOnce(ctx, u, header, r, size)
+		if err == nil {
+			return nil
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
+		last = err
+		last.Attempts = attempt
+		if err.StatusCode != 0 && err.StatusCode < 500 {
+			// 403 (expired or mismatched signature), a redirect or another
+			// refusal: the same URL will not do better.
+			last.Uncertain = uncertain
+			return last
+		}
+		// No answer, or a storage failure: the bytes may or may not be stored.
+		uncertain = true
+		last.Uncertain = true
+	}
+	return last
+}
+
+// putOnce makes one PUT attempt.
+func (c *Client) putOnce(ctx context.Context, u *url.URL, header http.Header, r io.ReaderAt, size int64) *StorageError {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), io.NewSectionReader(r, 0, size))
+	if err != nil {
+		return &StorageError{Err: stripURL(err)}
+	}
+	req.ContentLength = size
+	// Lets the transport resend the body on a stale pooled connection to the
+	// same host; redirects are refused by the storage client.
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(io.NewSectionReader(r, 0, size)), nil
+	}
+	req.Header = header.Clone()
+
+	resp, err := c.storage.Do(req)
+	if err != nil {
 		return &StorageError{Err: fmt.Errorf("%s: %w", u.Host, stripURL(err))}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return nil
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		return &StorageError{StatusCode: resp.StatusCode, Message: "storage answered with a redirect; refusing to send the file elsewhere"}
 	}
 	return parseStorageError(resp.StatusCode, body)
 }

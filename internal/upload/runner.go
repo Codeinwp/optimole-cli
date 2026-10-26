@@ -305,14 +305,25 @@ func destinationRefused(err error) bool {
 	return false
 }
 
-// uploadOne runs the three steps for one file. A storage failure that a new
-// asset could fix (403, 5xx, network) restarts the file once from the
-// create step.
+// uploadOne runs the three steps for one file. The PUT itself retries the
+// same URL on network errors and 5xx answers. Only when storage refuses the
+// URL (403) or it expires is a new asset reserved, once; if an earlier PUT
+// may have stored the bytes, completing the first asset is tried before that,
+// since a second reservation would publish a duplicate.
 func (r *Runner) uploadOne(ctx context.Context, t task) Result {
 	res := Result{Item: t.item, Status: StatusFailed}
+	f, size, err := openForUpload(t.item)
+	if err != nil {
+		res.Err = err
+		return res
+	}
+	defer f.Close()
+	name := filepath.Base(t.item.Path)
+	dims := imageDimensions(f, size, name)
 	folderID := t.folderID
-	for attempt := 1; attempt <= 2; attempt++ {
-		key, url, err := r.attempt(ctx, t.item, &folderID)
+
+	for reservation := 1; reservation <= 2; reservation++ {
+		key, url, err := r.attempt(ctx, t.item, f, size, dims, &folderID)
 		res.Key = key
 		if folderID > 0 {
 			res.FolderID = folderID
@@ -327,30 +338,52 @@ func (r *Runner) uploadOne(ctx context.Context, t task) Result {
 			return res
 		}
 		var se *api.StorageError
-		if !errors.As(err, &se) || !se.Retryable() {
+		if !errors.As(err, &se) || !se.NeedsNewAsset() || reservation == 2 {
 			return res
+		}
+		if se.Uncertain {
+			asset, cerr := r.Client.CompleteAsset(ctx, key, dims)
+			if cerr == nil {
+				res.Status, res.URL, res.Err = StatusUploaded, asset.URL, nil
+				return res
+			}
+			if !isUploadNotFound(cerr) {
+				// Unknown whether the bytes landed: a new asset could be a duplicate.
+				res.Err = fmt.Errorf("%w; checking whether it was stored anyway: %v", err, cerr)
+				return res
+			}
 		}
 	}
 	return res
 }
 
-// attempt makes one create → PUT → complete pass. folderID, when set, is
-// sent instead of the folder path, and is updated from the create answer.
-func (r *Runner) attempt(ctx context.Context, it Item, folderID *int64) (key, url string, err error) {
+func isUploadNotFound(err error) bool {
+	var apiErr *api.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == api.CodeUploadNotFound
+}
+
+// openForUpload opens a planned file and checks it still has the planned
+// size.
+func openForUpload(it Item) (*os.File, int64, error) {
 	f, err := os.Open(it.Path)
 	if err != nil {
-		return "", "", fmt.Errorf("open: %w", unwrapPathError(err))
+		return nil, 0, fmt.Errorf("open: %w", unwrapPathError(err))
 	}
-	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return "", "", fmt.Errorf("stat: %w", unwrapPathError(err))
+		f.Close()
+		return nil, 0, fmt.Errorf("stat: %w", unwrapPathError(err))
 	}
-	size := info.Size()
-	if err := CheckSize(size); err != nil {
-		return "", "", fmt.Errorf("file changed since it was listed: %w", err)
+	if info.Size() != it.Size {
+		f.Close()
+		return nil, 0, fmt.Errorf("file changed since it was listed (now %d bytes, was %d)", info.Size(), it.Size)
 	}
+	return f, info.Size(), nil
+}
 
+// attempt makes one create → PUT → complete pass. folderID, when set, is
+// sent instead of the folder path, and is updated from the create answer.
+func (r *Runner) attempt(ctx context.Context, it Item, f io.ReaderAt, size int64, dims *api.Dimensions, folderID *int64) (key, url string, err error) {
 	req := api.CreateAssetRequest{Filename: filepath.Base(it.Path), Size: size}
 	switch {
 	case *folderID > 0:
@@ -373,7 +406,6 @@ func (r *Runner) attempt(ctx context.Context, it Item, folderID *int64) (key, ur
 	if err != nil {
 		return key, "", err
 	}
-	dims := imageDimensions(f, size, req.Filename)
 	if err := r.Client.PutObject(ctx, target, f, size); err != nil {
 		return key, "", err
 	}

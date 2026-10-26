@@ -109,30 +109,52 @@ type StorageError struct {
 	Code       string
 	Message    string
 	Err        error
+	// Attempts is how many PUTs were made to the URL.
+	Attempts int
+	// Uncertain is set when an attempt got no answer or a 5xx, so the bytes
+	// may have been stored under this asset after all.
+	Uncertain bool
+	// Expired is set when retries stopped because the URL expired.
+	Expired bool
 }
 
 func (e *StorageError) Error() string {
+	var msg, details string
 	if e.StatusCode == 0 {
-		return fmt.Sprintf("upload to storage: %v", e.Err)
+		msg = fmt.Sprint(e.Err)
+	} else {
+		details = fmt.Sprintf("HTTP %d", e.StatusCode)
+		if e.Code != "" {
+			details += "; " + e.Code
+		}
+		msg = e.Message
+		if msg == "" {
+			msg = http.StatusText(e.StatusCode)
+		}
 	}
-	details := fmt.Sprintf("HTTP %d", e.StatusCode)
-	if e.Code != "" {
-		details += "; " + e.Code
+	extra := []string{}
+	if details != "" {
+		extra = append(extra, details)
 	}
-	msg := e.Message
-	if msg == "" {
-		msg = http.StatusText(e.StatusCode)
+	if e.Attempts > 1 {
+		extra = append(extra, fmt.Sprintf("after %d attempts", e.Attempts))
 	}
-	return fmt.Sprintf("upload to storage: %s (%s)", msg, details)
+	if e.Expired {
+		extra = append(extra, "the upload URL expired")
+	}
+	if len(extra) == 0 {
+		return "upload to storage: " + msg
+	}
+	return fmt.Sprintf("upload to storage: %s (%s)", msg, strings.Join(extra, "; "))
 }
 
 func (e *StorageError) Unwrap() error { return e.Err }
 
-// Retryable reports whether a fresh asset should be tried: the URL expired or
-// the signature did not match (403), storage failed (5xx), or the connection
-// broke.
-func (e *StorageError) Retryable() bool {
-	return e.StatusCode == 0 || e.StatusCode == http.StatusForbidden || e.StatusCode >= 500
+// NeedsNewAsset reports whether only a new reservation can get the file
+// stored: storage refused the URL (403: expired or mismatched signature) or
+// the URL expired while retrying.
+func (e *StorageError) NeedsNewAsset() bool {
+	return e.StatusCode == http.StatusForbidden || e.Expired
 }
 
 // parseError builds an *Error from a non-2xx dashboard response.
