@@ -52,6 +52,10 @@ type Runner struct {
 	// OnResult receives every result, one at a time, from the goroutine
 	// that called Run.
 	OnResult func(Result)
+	// Abort, when set, is checked before each file starts; a non-nil error
+	// stops the run like a fatal error (the CLI uses it when its output can
+	// no longer be written).
+	Abort func() error
 }
 
 // Outcome summarizes a run.
@@ -146,6 +150,12 @@ func (r *Runner) Run(ctx context.Context, items []Item) Outcome {
 			if err := ctx.Err(); err != nil {
 				out.Stopped = err
 				break
+			}
+			if r.Abort != nil {
+				if err := r.Abort(); err != nil {
+					out.Stopped = err
+					break
+				}
 			}
 			i := gate.next(ready)
 			if i < 0 {

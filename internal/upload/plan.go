@@ -3,6 +3,7 @@
 package upload
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -117,15 +118,24 @@ func usageErrorf(format string, args ...any) error {
 // directories are ignored unless IncludeHidden; symbolic links are never
 // followed and are reported as skipped; files the server would refuse
 // (extension, size, name length, folder path) are reported as skipped.
-func BuildPlan(args []string, opts PlanOptions) (*Plan, error) {
+//
+// When ctx is cancelled it stops and returns the plan so far with ctx's
+// error.
+func BuildPlan(ctx context.Context, args []string, opts PlanOptions) (*Plan, error) {
 	for _, pattern := range opts.Excludes {
 		if _, err := path.Match(pattern, ""); err != nil {
 			return nil, usageErrorf("invalid --exclude pattern %q: %v", pattern, err)
 		}
 	}
-	b := &builder{opts: opts, plan: &Plan{}, ids: map[any]bool{}, byPath: map[string][]fs.FileInfo{}}
+	b := &builder{ctx: ctx, opts: opts, plan: &Plan{}, ids: map[any]bool{}, byPath: map[string][]fs.FileInfo{}}
 	for _, arg := range args {
+		if err := ctx.Err(); err != nil {
+			return b.plan, err
+		}
 		if err := b.addArg(arg); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return b.plan, ctxErr
+			}
 			return nil, err
 		}
 	}
@@ -133,6 +143,7 @@ func BuildPlan(args []string, opts PlanOptions) (*Plan, error) {
 }
 
 type builder struct {
+	ctx  context.Context
 	opts PlanOptions
 	plan *Plan
 	// ids and byPath remember the files already planned, by identity.
@@ -174,6 +185,9 @@ func (b *builder) addArg(arg string) error {
 
 func (b *builder) walk(root string) error {
 	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if ctxErr := b.ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			// A directory that cannot be read (or an entry that vanished).
 			b.plan.Items = append(b.plan.Items, Item{Path: p, Status: StatusFailed, Reason: "cannot read: " + unwrapPathError(err).Error()})

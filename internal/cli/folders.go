@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/Codeinwp/optimole-cli/internal/api"
+	"github.com/Codeinwp/optimole-cli/internal/output"
 )
 
 const foldersUsage = `Usage:
@@ -56,7 +57,7 @@ func runFolders(ctx context.Context, args []string, env Env) int {
 		return flagExit(err)
 	}
 	if len(rest) > 0 {
-		return usageError(env, "folders", "unexpected argument %q", rest[0])
+		return usageError(env, "folders", "takes no arguments")
 	}
 	parent = strings.ToLower(strings.TrimSpace(parent))
 	if parent != "" && !parentPattern.MatchString(parent) {
@@ -109,31 +110,33 @@ func runFolders(ctx context.Context, args []string, env Env) int {
 		return strings.ToLower(a) < strings.ToLower(b)
 	})
 
+	out := output.NewErrWriter(env.Stdout)
 	if jsonOut {
-		enc := json.NewEncoder(env.Stdout)
+		enc := json.NewEncoder(out)
 		enc.SetEscapeHTML(false)
 		for _, l := range lines {
 			enc.Encode(l)
 		}
-		return ExitOK
-	}
-	if len(lines) == 0 {
-		fmt.Fprintln(env.Stdout, "No folders.")
-		return ExitOK
-	}
-	tw := tabwriter.NewWriter(env.Stdout, 0, 4, 2, ' ', 0)
-	if parent == "" {
-		fmt.Fprintln(tw, "ID\tPATH")
-		for _, l := range lines {
-			fmt.Fprintf(tw, "%d\t%s\n", l.ID, l.Path)
-		}
+	} else if len(lines) == 0 {
+		fmt.Fprintln(out, "No folders.")
 	} else {
-		fmt.Fprintln(tw, "ID\tNAME")
-		for _, l := range lines {
-			fmt.Fprintf(tw, "%d\t%s\n", l.ID, l.Name)
+		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+		if parent == "" {
+			fmt.Fprintln(tw, "ID\tPATH")
+			for _, l := range lines {
+				fmt.Fprintf(tw, "%d\t%s\n", l.ID, l.Path)
+			}
+		} else {
+			fmt.Fprintln(tw, "ID\tNAME")
+			for _, l := range lines {
+				fmt.Fprintf(tw, "%d\t%s\n", l.ID, l.Name)
+			}
 		}
+		tw.Flush()
 	}
-	tw.Flush()
+	if err := out.Err(); err != nil {
+		return outputFailed(env, err)
+	}
 	return ExitOK
 }
 

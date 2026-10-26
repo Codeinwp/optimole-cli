@@ -559,9 +559,58 @@ func TestLoginFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoginNeverEchoesAPositionalKey: "optimole login $KEY" is a mistake the
+// error message must not turn into a leak.
+func TestLoginNeverEchoesAPositionalKey(t *testing.T) {
+	const key = "optml-positional-secret-0123456789"
+	for _, args := range [][]string{{"login", key}, {"login", "--api-url", "https://x.example/api", key}, {"logout", key}, {"folders", key}} {
+		h := newHarness(t)
+		h.vars[config.EnvAPIKey] = testserver.DefaultKey
+		if code := h.run(args...); code != ExitUsage {
+			t.Fatalf("%v: exit %d", args[0], code)
+		}
+		if out := h.stdout.String() + h.stderr.String(); strings.Contains(out, key) || strings.Contains(out, "positional-secret") {
+			t.Fatalf("%v printed the key:\n%s", args[0], out)
+		}
+		if _, err := os.Stat(config.Path(h.cfgDir)); err == nil {
+			t.Fatal("a key was saved")
+		}
+	}
+}
+
+// TestLoginCancelWhileReadingStdin: a pipe that never delivers a line must
+// not keep Ctrl-C from working.
+func TestLoginCancelWhileReadingStdin(t *testing.T) {
 	h := newHarness(t)
-	if code := h.run("login", "some-key-on-the-command-line"); code != ExitUsage {
-		t.Fatalf("positional key: exit %d", code)
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	h.stdin = pr
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	done := make(chan int, 1)
+	go func() { done <- h.runCtx(ctx, "login") }()
+	select {
+	case code := <-done:
+		if code != ExitInterrupted {
+			t.Fatalf("exit %d, want %d", code, ExitInterrupted)
+		}
+	case <-time.After(5 * time.Second):
+		pw.Close()
+		t.Fatal("login ignored the cancellation while reading stdin")
+	}
+}
+
+func TestLoginReadsOneBoundedLine(t *testing.T) {
+	h := newHarness(t)
+	h.stdin = strings.NewReader(strings.Repeat("k", 10000))
+	if code := h.run("login"); code != ExitUsage || !strings.Contains(h.stderr.String(), "too long") {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	h.stdin = strings.NewReader("\n\n" + testserver.DefaultKey + "\nsecond-line-ignored\n")
+	if code := h.run("login"); code != ExitOK {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
 	}
 }
 
@@ -591,5 +640,132 @@ func TestParseArgs(t *testing.T) {
 	}
 	if !*r || *folder != "F" || strings.Join(pos, ",") != "a,b,-c,d" {
 		t.Fatalf("r=%v folder=%q pos=%v", *r, *folder, pos)
+	}
+}
+
+// countdownCtx reports cancellation after its Err method has been asked n
+// times, to cancel in the middle of a walk.
+type countdownCtx struct {
+	context.Context
+	mu   sync.Mutex
+	n    int
+	done chan struct{}
+}
+
+func newCountdownCtx(n int) *countdownCtx {
+	return &countdownCtx{Context: context.Background(), n: n, done: make(chan struct{})}
+}
+
+func (c *countdownCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.n <= 0 {
+		return context.Canceled
+	}
+	c.n--
+	if c.n == 0 {
+		close(c.done)
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *countdownCtx) Done() <-chan struct{} { return c.done }
+
+func TestDryRunCancellation(t *testing.T) {
+	files := map[string]string{}
+	for i := range 50 {
+		files[fmt.Sprintf("d%02d/f.jpg", i)] = "x"
+	}
+	root := tree(t, files)
+
+	t.Run("before planning", func(t *testing.T) {
+		h := newHarness(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if code := h.runCtx(ctx, "upload", "--dry-run", "--json", "-r", root); code != ExitInterrupted {
+			t.Fatalf("exit %d", code)
+		}
+		lines := h.jsonLines()
+		if len(lines) != 1 || lines[0]["summary"].(map[string]any)["interrupted"] != true {
+			t.Fatalf("output = %v", lines)
+		}
+	})
+	t.Run("during the walk", func(t *testing.T) {
+		h := newHarness(t)
+		if code := h.runCtx(newCountdownCtx(20), "upload", "--dry-run", "-r", root); code != ExitInterrupted {
+			t.Fatalf("exit %d", code)
+		}
+		if out := h.stdout.String(); !strings.Contains(out, "Interrupted.") || strings.Count(out, "planned ") == 50 {
+			t.Fatalf("stdout:\n%s", out)
+		}
+	})
+	t.Run("while listing", func(t *testing.T) {
+		h := newHarness(t)
+		// The walk checks once per entry (about 100), the plan loop once per
+		// file (50); the rest of the budget runs out while printing.
+		if code := h.runCtx(newCountdownCtx(160), "upload", "--dry-run", "-r", root); code != ExitInterrupted {
+			t.Fatalf("exit %d", code)
+		}
+		out := h.stdout.String()
+		if n := strings.Count(out, "planned "); n == 0 || n == 50 || !strings.Contains(out, "Interrupted.") {
+			t.Fatalf("%d planned lines; stdout:\n%s", n, out)
+		}
+	})
+}
+
+// failingWriter fails every write after the first ok ones.
+type failingWriter struct {
+	mu sync.Mutex
+	ok int
+}
+
+func (f *failingWriter) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ok > 0 {
+		f.ok--
+		return len(p), nil
+	}
+	return 0, errors.New("no space left on device")
+}
+
+func TestOutputWriteErrors(t *testing.T) {
+	root := tree(t, map[string]string{"a.jpg": "a", "b.jpg": "b", "c.jpg": "c", "d.jpg": "d"})
+	runWith := func(t *testing.T, w io.Writer, args ...string) (*harness, int) {
+		h := newHarness(t).withKey()
+		h.srv.AddFolder("A")
+		env := h.env()
+		env.Stdout = w
+		return h, Run(context.Background(), args, env)
+	}
+	t.Run("upload stops starting files", func(t *testing.T) {
+		h, code := runWith(t, &failingWriter{}, "upload", "--json", "-c", "1", "-r", root)
+		if code != ExitFailure || !strings.Contains(h.stderr.String(), "writing output: no space left on device") {
+			t.Fatalf("exit %d: %s", code, h.stderr.String())
+		}
+		if n := h.srv.Count(testserver.RouteCreate); n != 1 {
+			t.Fatalf("creates = %d, want 1: uploads went on after the output failed", n)
+		}
+	})
+	t.Run("human upload output", func(t *testing.T) {
+		h, code := runWith(t, &failingWriter{ok: 1}, "upload", "-r", root)
+		if code != ExitFailure || !strings.Contains(h.stderr.String(), "writing output") {
+			t.Fatalf("exit %d: %s", code, h.stderr.String())
+		}
+	})
+	t.Run("dry run", func(t *testing.T) {
+		h, code := runWith(t, &failingWriter{}, "upload", "--dry-run", "-r", root)
+		if code != ExitFailure || !strings.Contains(h.stderr.String(), "writing output") {
+			t.Fatalf("exit %d: %s", code, h.stderr.String())
+		}
+	})
+	for _, args := range [][]string{{"folders"}, {"folders", "--json"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			h, code := runWith(t, &failingWriter{}, args...)
+			if code != ExitFailure || !strings.Contains(h.stderr.String(), "writing output") {
+				t.Fatalf("exit %d: %s", code, h.stderr.String())
+			}
+		})
 	}
 }

@@ -39,7 +39,7 @@ func newClient(t *testing.T, srv *testserver.Server, key string) *api.Client {
 func run(t *testing.T, ctx context.Context, srv *testserver.Server, key string, root string, opts PlanOptions, r Runner) (map[string]Result, Outcome) {
 	t.Helper()
 	opts.Recursive = true
-	plan, err := BuildPlan([]string{root}, opts)
+	plan, err := BuildPlan(context.Background(), []string{root}, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestRunFileChangedSinceListing(t *testing.T) {
 	srv := testserver.New(t)
 	root := t.TempDir()
 	writeBytes(t, root, "a.jpg", []byte("abc"))
-	plan, err := BuildPlan([]string{root}, PlanOptions{Recursive: true})
+	plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{Recursive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,7 +554,7 @@ func TestRunRefusesFilesReplacedAfterPlanning(t *testing.T) {
 				}
 				mustRemove(t, probe)
 			}
-			plan, err := BuildPlan([]string{root}, PlanOptions{Recursive: true})
+			plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{Recursive: true})
 			if err != nil {
 				t.Fatal(err)
 			}

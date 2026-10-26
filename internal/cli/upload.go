@@ -102,16 +102,6 @@ func runUpload(ctx context.Context, args []string, env Env) int {
 		return usageError(env, "upload", "--folder: %v", err)
 	}
 
-	plan, err := upload.BuildPlan(paths, opts)
-	if err != nil {
-		var ue *upload.UsageError
-		if errors.As(err, &ue) {
-			return usageError(env, "upload", "%v", err)
-		}
-		fmt.Fprintf(env.Stderr, "optimole upload: %v\n", err)
-		return ExitFailure
-	}
-
 	// The reporter redacts with the session's key once there is one.
 	var sess *session
 	rep := output.New(env.Stdout, jsonOut, func(s string) string {
@@ -120,8 +110,30 @@ func runUpload(ctx context.Context, args []string, env Env) int {
 		}
 		return s
 	})
+	// interrupted prints the summary of a run stopped by Ctrl-C.
+	interrupted := func(ignored int) int {
+		rep.Finish(ignored, dryRun, true)
+		return ExitInterrupted
+	}
+
+	plan, err := upload.BuildPlan(ctx, paths, opts)
+	if err != nil {
+		if ctx.Err() != nil {
+			return interrupted(0)
+		}
+		var ue *upload.UsageError
+		if errors.As(err, &ue) {
+			return usageError(env, "upload", "%v", err)
+		}
+		fmt.Fprintf(env.Stderr, "optimole upload: %v\n", err)
+		return ExitFailure
+	}
+
 	planFailed := false
 	for _, it := range plan.Items {
+		if ctx.Err() != nil {
+			return interrupted(plan.Ignored)
+		}
 		if it.Status == upload.StatusPlanned {
 			continue
 		}
@@ -134,22 +146,33 @@ func runUpload(ctx context.Context, args []string, env Env) int {
 
 	if dryRun {
 		for _, it := range selected {
+			if ctx.Err() != nil {
+				return interrupted(plan.Ignored)
+			}
 			rep.Planned(it)
 		}
 		rep.Finish(plan.Ignored, true, false)
-		if len(selected) == 0 {
+		switch {
+		case rep.Err() != nil:
+			return outputFailed(env, rep.Err())
+		case len(selected) == 0:
 			fmt.Fprintln(env.Stderr, "optimole upload: nothing to upload")
 			return ExitFailure
-		}
-		if planFailed {
+		case planFailed:
 			return ExitFailure
 		}
 		return ExitOK
 	}
 	if len(selected) == 0 {
 		rep.Finish(plan.Ignored, false, false)
+		if rep.Err() != nil {
+			return outputFailed(env, rep.Err())
+		}
 		fmt.Fprintln(env.Stderr, "optimole upload: nothing to upload")
 		return ExitFailure
+	}
+	if rep.Err() != nil {
+		return outputFailed(env, rep.Err())
 	}
 
 	if sess, err = common.connect(env); err != nil {
@@ -162,6 +185,9 @@ func runUpload(ctx context.Context, args []string, env Env) int {
 		Concurrency:   concurrency,
 		CreateFolders: createFolders,
 		OnResult:      rep.Result,
+		// Results that cannot be written are results lost: stop starting
+		// new uploads once the output fails.
+		Abort: rep.Err,
 	}
 	outcome := runner.Run(ctx, selected)
 	rep.Finish(plan.Ignored, false, outcome.Interrupted)
@@ -169,6 +195,8 @@ func runUpload(ctx context.Context, args []string, env Env) int {
 	switch {
 	case outcome.Interrupted:
 		return ExitInterrupted
+	case rep.Err() != nil:
+		return outputFailed(env, rep.Err())
 	case outcome.Failed > 0 || planFailed:
 		if isRejectedKey(outcome.Stopped) {
 			fmt.Fprintf(env.Stderr, "optimole upload: the API key (from %s) was rejected\n", sess.settings.KeySource)
@@ -176,6 +204,13 @@ func runUpload(ctx context.Context, args []string, env Env) int {
 		return ExitFailure
 	}
 	return ExitOK
+}
+
+// outputFailed reports that results could not be written; the run is a
+// failure even if every upload worked, since the caller lost the results.
+func outputFailed(env Env, err error) int {
+	fmt.Fprintf(env.Stderr, "optimole: writing output: %v\n", err)
+	return ExitFailure
 }
 
 func parseFolderID(raw string) (int64, error) {

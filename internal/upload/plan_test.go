@@ -1,6 +1,7 @@
 package upload
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ func TestPlanRecursiveMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := BuildPlan([]string{root}, PlanOptions{
+	plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{
 		Folder:    "Campaigns",
 		Recursive: true,
 		Excludes:  []string{"skip-*", "drafts", "2024/thumbs"},
@@ -110,7 +111,7 @@ func TestPlanRootAndHidden(t *testing.T) {
 	writeFile(t, root, ".cache/b.jpg", 1)
 	writeFile(t, root, "sub/c.jpg", 1)
 
-	plan, err := BuildPlan([]string{root}, PlanOptions{Recursive: true, IncludeHidden: true})
+	plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{Recursive: true, IncludeHidden: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestPlanExplicitFiles(t *testing.T) {
 	a := writeFile(t, root, "a.jpg", 1)
 	thumb := writeFile(t, root, "a-thumb.jpg", 1)
 
-	plan, err := BuildPlan([]string{hidden, a, a, thumb}, PlanOptions{Folder: "X", Excludes: []string{"*-thumb.jpg"}})
+	plan, err := BuildPlan(context.Background(), []string{hidden, a, a, thumb}, PlanOptions{Folder: "X", Excludes: []string{"*-thumb.jpg"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +163,7 @@ func TestPlanSymlinksAreNotFollowed(t *testing.T) {
 		t.Skipf("cannot create symlinks here: %v", err)
 	}
 
-	plan, err := BuildPlan([]string{root}, PlanOptions{Recursive: true})
+	plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{Recursive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +181,7 @@ func TestPlanSymlinksAreNotFollowed(t *testing.T) {
 	}
 
 	// A symlink named on the command line is skipped too.
-	plan, err = BuildPlan([]string{filepath.Join(root, "link.jpg")}, PlanOptions{})
+	plan, err = BuildPlan(context.Background(), []string{filepath.Join(root, "link.jpg")}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +200,7 @@ func TestPlanTrailingSlashSymlink(t *testing.T) {
 		t.Skipf("cannot create symlinks here: %v", err)
 	}
 	for _, arg := range []string{link + string(filepath.Separator), link + "/", link + "/."} {
-		plan, err := BuildPlan([]string{arg}, PlanOptions{Recursive: true})
+		plan, err := BuildPlan(context.Background(), []string{arg}, PlanOptions{Recursive: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -221,7 +222,7 @@ func TestPlanCaseAliases(t *testing.T) {
 	if !insensitive {
 		writeFile(t, root, "PHOTO.JPG", 5)
 	}
-	plan, err := BuildPlan([]string{lower, upper, root}, PlanOptions{Recursive: true})
+	plan, err := BuildPlan(context.Background(), []string{lower, upper, root}, PlanOptions{Recursive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +252,7 @@ func TestPlanUsageErrors(t *testing.T) {
 		{"folder-id with subdirectories", []string{root}, PlanOptions{Recursive: true, FolderID: 7}},
 	}
 	for _, tc := range cases {
-		_, err := BuildPlan(tc.args, tc.opts)
+		_, err := BuildPlan(context.Background(), tc.args, tc.opts)
 		var ue *UsageError
 		if !errors.As(err, &ue) {
 			t.Errorf("%s: err = %v, want a UsageError", tc.name, err)
@@ -259,7 +260,7 @@ func TestPlanUsageErrors(t *testing.T) {
 	}
 
 	// Skipped files in subdirectories do not trip the --folder-id rule.
-	plan, err := BuildPlan([]string{filepath.Join(root, "a.jpg"), filepath.Join(root, "only-skipped")}, PlanOptions{Recursive: true, FolderID: 7})
+	plan, err := BuildPlan(context.Background(), []string{filepath.Join(root, "a.jpg"), filepath.Join(root, "only-skipped")}, PlanOptions{Recursive: true, FolderID: 7})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +275,7 @@ func TestPlanFolderLimits(t *testing.T) {
 	writeFile(t, root, deep, 1)
 	writeFile(t, root, "ok/b.jpg", 1)
 
-	plan, err := BuildPlan([]string{root}, PlanOptions{Folder: "Base", Recursive: true})
+	plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{Folder: "Base", Recursive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,5 +345,17 @@ func TestCheckSize(t *testing.T) {
 	}
 	if MaxFileSize != 104857600 {
 		t.Fatalf("MaxFileSize = %d", MaxFileSize)
+	}
+}
+
+func TestPlanStopsWhenCancelled(t *testing.T) {
+	root := t.TempDir()
+	for i := range 20 {
+		writeFile(t, root, filepath.Join("d", strings.Repeat("x", i+1)+".jpg"), 1)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := BuildPlan(ctx, []string{root}, PlanOptions{Recursive: true}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }

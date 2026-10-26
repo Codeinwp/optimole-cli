@@ -29,10 +29,38 @@ type Summary struct {
 	Interrupted bool `json:"interrupted,omitempty"`
 }
 
+// ErrWriter passes writes through and remembers the first error, so callers
+// can print freely and check once.
+type ErrWriter struct {
+	w   io.Writer
+	err error
+}
+
+// NewErrWriter wraps w.
+func NewErrWriter(w io.Writer) *ErrWriter { return &ErrWriter{w: w} }
+
+// Write writes p unless an earlier write failed.
+func (e *ErrWriter) Write(p []byte) (int, error) {
+	if e.err != nil {
+		return 0, e.err
+	}
+	n, err := e.w.Write(p)
+	if err == nil && n < len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		e.err = err
+	}
+	return n, err
+}
+
+// Err returns the first write error, if any.
+func (e *ErrWriter) Err() error { return e.err }
+
 // Reporter prints results. It is not safe for concurrent use; the runner
 // calls it from one goroutine.
 type Reporter struct {
-	w      io.Writer
+	w      *ErrWriter
 	json   bool
 	enc    *json.Encoder
 	redact func(string) string
@@ -45,10 +73,15 @@ func New(w io.Writer, jsonLines bool, redact func(string) string) *Reporter {
 	if redact == nil {
 		redact = func(s string) string { return s }
 	}
-	enc := json.NewEncoder(w)
+	ew := NewErrWriter(w)
+	enc := json.NewEncoder(ew)
 	enc.SetEscapeHTML(false)
-	return &Reporter{w: w, json: jsonLines, enc: enc, redact: redact}
+	return &Reporter{w: ew, json: jsonLines, enc: enc, redact: redact}
 }
+
+// Err returns the first error writing the output, if any. Once set, nothing
+// more is written.
+func (r *Reporter) Err() error { return r.w.Err() }
 
 // FileLine is the JSON object printed for each file.
 type FileLine struct {

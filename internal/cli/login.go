@@ -41,8 +41,12 @@ const logoutUsage = `Usage:
 Deletes the API key saved by "optimole login".
 `
 
-// maxKeyInput caps how much of stdin is read for a key.
-const maxKeyInput = 4096
+// maxKeyInput caps how much of stdin is read for a key; maxKeyLength is the
+// longest key accepted.
+const (
+	maxKeyInput  = 4096
+	maxKeyLength = 512
+)
 
 func runLogin(ctx context.Context, args []string, env Env) int {
 	fs := newFlagSet("login", loginUsage, env)
@@ -53,7 +57,8 @@ func runLogin(ctx context.Context, args []string, env Env) int {
 		return flagExit(err)
 	}
 	if len(rest) > 0 {
-		return usageError(env, "login", "unexpected argument %q (the key is read from stdin, never from the command line)", rest[0])
+		// Never echo it: the argument is most likely the key itself.
+		return usageError(env, "login", "takes no arguments; the key is read from stdin, never from the command line")
 	}
 	path, err := configPath(env)
 	if err != nil {
@@ -119,6 +124,8 @@ func runLogin(ctx context.Context, args []string, env Env) int {
 
 // readKey reads the key from stdin. On a terminal it prompts and hides the
 // input when the platform allows; otherwise it warns that input is visible.
+// From a pipe or file it takes the first non-blank line. Either way it reads
+// at most maxKeyInput bytes and gives up when ctx is done.
 func readKey(ctx context.Context, env Env) (string, error) {
 	var line string
 	f, isFile := env.Stdin.(*os.File)
@@ -128,7 +135,7 @@ func readKey(ctx context.Context, env Env) (string, error) {
 			fmt.Fprintln(env.Stderr, "warning: input cannot be hidden on this terminal; the key will be visible as you type.")
 		}
 		fmt.Fprint(env.Stderr, "Optimole API key: ")
-		line, err = readLine(ctx, f)
+		line, err = readKeyLine(ctx, f, false)
 		if restore != nil {
 			restore()
 			fmt.Fprintln(env.Stderr)
@@ -137,50 +144,59 @@ func readKey(ctx context.Context, env Env) (string, error) {
 			return "", err
 		}
 	} else {
-		data, err := io.ReadAll(io.LimitReader(env.Stdin, maxKeyInput))
-		if err != nil {
-			return "", fmt.Errorf("reading the key from stdin: %w", err)
-		}
-		for _, l := range strings.Split(string(data), "\n") {
-			if l = strings.TrimSpace(l); l != "" {
-				line = l
-				break
-			}
+		var err error
+		if line, err = readKeyLine(ctx, env.Stdin, true); err != nil {
+			return "", err
 		}
 	}
 	key := strings.TrimSpace(line)
-	if key == "" {
+	switch {
+	case key == "":
 		return "", errors.New("no API key on stdin")
-	}
-	if strings.IndexFunc(key, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+	case len(key) > maxKeyLength:
+		return "", errors.New("the input on stdin is too long to be an API key")
+	case strings.IndexFunc(key, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0:
 		return "", errors.New("the API key must be a single word without spaces")
 	}
 	return key, nil
 }
 
-// readLine reads one line from a terminal, giving up when ctx is done (the
-// read itself cannot be interrupted, so it is left behind).
-func readLine(ctx context.Context, f *os.File) (string, error) {
+// readKeyLine reads one line (with skipBlank, the first non-blank one) from
+// r, reading at most maxKeyInput bytes. A read cannot be interrupted, so when
+// ctx is done it returns at once and leaves the read behind; the process is
+// about to exit.
+func readKeyLine(ctx context.Context, r io.Reader, skipBlank bool) (string, error) {
 	type result struct {
 		line string
 		err  error
 	}
 	ch := make(chan result, 1)
 	go func() {
-		line, err := bufio.NewReaderSize(f, maxKeyInput).ReadString('\n')
-		if errors.Is(err, io.EOF) && line != "" {
-			err = nil
+		br := bufio.NewReader(io.LimitReader(r, maxKeyInput))
+		for {
+			line, err := br.ReadString('\n')
+			if errors.Is(err, io.EOF) {
+				err = nil
+				if line == "" {
+					ch <- result{"", nil}
+					return
+				}
+			}
+			if err != nil {
+				ch <- result{"", fmt.Errorf("reading the key: %w", err)}
+				return
+			}
+			if !skipBlank || strings.TrimSpace(line) != "" || !strings.HasSuffix(line, "\n") {
+				ch <- result{line, nil}
+				return
+			}
 		}
-		ch <- result{line, err}
 	}()
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case r := <-ch:
-		if r.err != nil {
-			return "", fmt.Errorf("reading the key: %w", r.err)
-		}
-		return r.line, nil
+	case res := <-ch:
+		return res.line, res.err
 	}
 }
 
@@ -191,7 +207,7 @@ func runLogout(args []string, env Env) int {
 		return flagExit(err)
 	}
 	if len(rest) > 0 {
-		return usageError(env, "logout", "unexpected argument %q", rest[0])
+		return usageError(env, "logout", "takes no arguments")
 	}
 	path, err := configPath(env)
 	if err != nil {

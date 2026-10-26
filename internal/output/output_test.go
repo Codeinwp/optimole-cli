@@ -117,3 +117,27 @@ func TestDryRun(t *testing.T) {
 		t.Fatalf("got %q\nwant %q", buf.String(), want)
 	}
 }
+
+type brokenWriter struct{ writes int }
+
+func (b *brokenWriter) Write(p []byte) (int, error) {
+	b.writes++
+	return 0, errors.New("broken pipe")
+}
+
+func TestWriteErrorsAreKept(t *testing.T) {
+	for _, jsonLines := range []bool{false, true} {
+		w := &brokenWriter{}
+		r := New(w, jsonLines, nil)
+		for _, res := range sampleResults() {
+			r.Result(res)
+		}
+		r.Finish(0, false, false)
+		if r.Err() == nil || r.Err().Error() != "broken pipe" {
+			t.Fatalf("json=%v: Err = %v", jsonLines, r.Err())
+		}
+		if w.writes != 1 {
+			t.Fatalf("json=%v: %d writes after the first failure, want none", jsonLines, w.writes-1)
+		}
+	}
+}

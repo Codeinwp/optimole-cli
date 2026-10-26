@@ -19,7 +19,7 @@ import (
 func TestRunFIFOSwappedInDoesNotHang(t *testing.T) {
 	root := t.TempDir()
 	writeBytes(t, root, "a.jpg", []byte("abc"))
-	plan, err := BuildPlan([]string{root}, PlanOptions{Recursive: true})
+	plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{Recursive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
