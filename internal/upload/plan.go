@@ -152,9 +152,7 @@ type builder struct {
 }
 
 func (b *builder) addArg(arg string) error {
-	// Without trailing separators, so that "link/" is seen as the symlink
-	// it is rather than as the directory it points to.
-	arg = filepath.Clean(arg)
+	arg = trimArg(arg)
 	info, err := os.Lstat(arg)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -181,6 +179,35 @@ func (b *builder) addArg(arg string) error {
 		b.skip(arg, "not a regular file")
 	}
 	return nil
+}
+
+// trimArg removes trailing separators and trailing "." segments ("dir/",
+// "dir/.", "dir/./"), so that "link/" is seen as the symlink it is rather than
+// as the directory it points to. Nothing else changes: an inner ".." keeps
+// its meaning ("link/../a.jpg" is the a.jpg next to the link's target, which
+// filepath.Clean would turn into the local a.jpg).
+func trimArg(arg string) string {
+	vol := filepath.VolumeName(arg)
+	rest := arg[len(vol):]
+	isSep := func(c byte) bool { return c == '/' || os.IsPathSeparator(c) }
+	for {
+		end := len(rest)
+		for end > 0 && isSep(rest[end-1]) {
+			end--
+		}
+		switch {
+		case end == 0 && len(rest) > 0:
+			return vol + rest[:1] // the root itself
+		case end == 0:
+			return vol
+		case rest[:end] == ".":
+			return vol + "."
+		case end >= 2 && rest[end-1] == '.' && isSep(rest[end-2]):
+			rest = rest[:end-1] // drop a trailing "." segment, then its separator
+			continue
+		}
+		return vol + rest[:end]
+	}
 }
 
 func (b *builder) walk(root string) error {

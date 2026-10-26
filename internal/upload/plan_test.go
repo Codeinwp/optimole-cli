@@ -210,6 +210,57 @@ func TestPlanTrailingSlashSymlink(t *testing.T) {
 	}
 }
 
+// TestPlanKeepsInnerDotDot: "link/../photo.jpg" names the photo.jpg next to
+// the link's target, not the local one; only trailing separators and "."
+// segments are trimmed from arguments.
+func TestPlanKeepsInnerDotDot(t *testing.T) {
+	root := t.TempDir()
+	other := writeFile(t, root, "other/photo.jpg", 5)
+	writeFile(t, root, "other/subdir/x.jpg", 1)
+	writeFile(t, root, "work/photo.jpg", 7)
+	if err := os.Symlink(filepath.Join(root, "other", "subdir"), filepath.Join(root, "work", "link")); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+	arg := filepath.Join(root, "work", "link") + string(filepath.Separator) + ".." + string(filepath.Separator) + "photo.jpg"
+	plan, err := BuildPlan(context.Background(), []string{arg}, PlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Lstat(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Items) != 1 || plan.Items[0].Path != arg || plan.Items[0].Size != 5 || !os.SameFile(plan.Items[0].info, want) {
+		t.Fatalf("plan = %+v, want %s (the target's sibling)", plan.Items, other)
+	}
+}
+
+func TestTrimArg(t *testing.T) {
+	sep := string(filepath.Separator)
+	cases := map[string]string{
+		"link/":         "link",
+		"link//":        "link",
+		"link/.":        "link",
+		"link/./":       "link",
+		"link/./.":      "link",
+		"a/../b.jpg":    "a/../b.jpg",
+		"a/./b":         "a/./b",
+		"./photos/":     "./photos",
+		".":             ".",
+		"./":            ".",
+		"/":             "/",
+		"///":           "/",
+		"..":            "..",
+		"../":           "..",
+		"a" + sep + ".": "a",
+	}
+	for in, want := range cases {
+		if got := trimArg(in); got != want {
+			t.Errorf("trimArg(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestPlanCaseAliases: on a case-insensitive file system "a.jpg" and "A.JPG"
 // are one file and must be uploaded once; on a case-sensitive one they are
 // two files and both are kept.
