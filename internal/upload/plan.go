@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -214,7 +215,19 @@ func (b *builder) addArg(arg string) error {
 // one directory (the link target's parent) but descend through another (the
 // argument's own parent). Below a symlink-free root, lexical and physical
 // paths agree, and children are still lstat-checked and never followed.
+//
+// Windows is different: it applies ".." to the path text before it looks at
+// any link, and "\photos" or "D:photos" are relative to a drive, not to the
+// working directory. filepath.Abs follows exactly those rules there, so the
+// path is made absolute first and its links resolved after.
 func physicalDir(arg string) (string, error) {
+	if runtime.GOOS == "windows" {
+		abs, err := filepath.Abs(arg)
+		if err != nil {
+			return "", err
+		}
+		return filepath.EvalSymlinks(abs)
+	}
 	resolved, err := filepath.EvalSymlinks(arg)
 	if err != nil {
 		return "", err

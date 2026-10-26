@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -384,6 +385,39 @@ func TestPlanPlainDirectoryArgumentsUnchanged(t *testing.T) {
 				t.Fatalf("%q: got %v, want %v", arg, got, want)
 			}
 		}
+	}
+}
+
+// TestPlanWindowsDriveRootedArgument: on Windows "\dir" names dir at the root
+// of the current drive, not below the working directory, even when a
+// directory with that path also exists there.
+func TestPlanWindowsDriveRootedArgument(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("drive-rooted paths exist only on Windows")
+	}
+	base := t.TempDir()
+	writeFile(t, base, "photos/right.jpg", 1)
+	rooted := strings.TrimPrefix(filepath.Join(base, "photos"), filepath.VolumeName(base))
+
+	// The same path below the working directory holds a different file.
+	work := filepath.Join(base, "work")
+	writeFile(t, work, filepath.Join(rooted, "wrong.jpg"), 1)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(wd) })
+
+	plan, err := BuildPlan(context.Background(), []string{rooted}, PlanOptions{Recursive: true, Folder: "F"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := plan.Selected()
+	if len(selected) != 1 || filepath.Base(selected[0].Path) != "right.jpg" {
+		t.Fatalf("selected %+v, want only photos\\right.jpg at the drive root", selected)
 	}
 }
 
