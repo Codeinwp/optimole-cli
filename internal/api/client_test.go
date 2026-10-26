@@ -155,6 +155,35 @@ func TestSVGSignsContentDisposition(t *testing.T) {
 	}
 }
 
+// TestPutObjectIgnoresSignedHostHeader: a Host entry in upload.headers must
+// not redirect the bytes; the PUT goes to, and names, the URL's host.
+func TestPutObjectIgnoresSignedHostHeader(t *testing.T) {
+	var mu sync.Mutex
+	var hosts []string
+	s3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		hosts = append(hosts, r.Host)
+		mu.Unlock()
+	}))
+	defer s3.Close()
+	c, _ := newTestClient(t, "http://127.0.0.1:1/api")
+	target := UploadTarget{
+		URL:     s3.URL + "/bucket/key",
+		Method:  http.MethodPut,
+		Headers: map[string]string{"Host": "attacker.example", "host": "attacker.example", "Content-Type": "image/png"},
+	}
+	if err := c.PutObject(context.Background(), target, strings.NewReader("abc"), 3); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.TrimPrefix(s3.URL, "http://")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hosts) != 1 || hosts[0] != want {
+		t.Fatalf("storage saw Host %v, want [%s]", hosts, want)
+	}
+}
+
 func TestPutObjectRejectsWrongSizeOrType(t *testing.T) {
 	srv := testserver.New(t)
 	c, _ := newTestClient(t, srv.URL)
