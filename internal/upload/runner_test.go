@@ -511,3 +511,97 @@ func TestRunFileChangedSinceListing(t *testing.T) {
 		t.Fatalf("result = %+v", got)
 	}
 }
+
+// TestRunRefusesFilesReplacedAfterPlanning: between planning and upload a
+// file, or one of its directories, is swapped for something else. Nothing
+// outside what was listed may be uploaded.
+func TestRunRefusesFilesReplacedAfterPlanning(t *testing.T) {
+	outside := t.TempDir()
+	writeBytes(t, outside, "secret.jpg", []byte("SECRET"))
+	writeBytes(t, outside, "sub/a.jpg", []byte("SECRET"))
+
+	cases := []struct {
+		name    string
+		symlink bool
+		swap    func(t *testing.T, root string)
+		want    string
+	}{
+		{"file replaced by a symlink", true, func(t *testing.T, root string) {
+			mustRemove(t, filepath.Join(root, "a.jpg"))
+			mustSymlink(t, filepath.Join(outside, "secret.jpg"), filepath.Join(root, "a.jpg"))
+		}, "replaced"},
+		{"parent directory replaced by a symlink", true, func(t *testing.T, root string) {
+			mustRemove(t, filepath.Join(root, "sub"))
+			mustSymlink(t, filepath.Join(outside, "sub"), filepath.Join(root, "sub"))
+		}, "replaced"},
+		{"file replaced by another file", false, func(t *testing.T, root string) {
+			mustRemove(t, filepath.Join(root, "a.jpg"))
+			writeBytes(t, root, "a.jpg", []byte("OTHER!"))
+		}, "replaced"},
+		{"file grew", false, func(t *testing.T, root string) {
+			writeBytes(t, root, "a.jpg", []byte("SECRET+more"))
+		}, "changed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeBytes(t, root, "a.jpg", []byte("public"))
+			writeBytes(t, root, "sub/a.jpg", []byte("public"))
+			if tc.symlink {
+				probe := filepath.Join(root, "probe")
+				if err := os.Symlink(root, probe); err != nil {
+					t.Skipf("cannot create symlinks here: %v", err)
+				}
+				mustRemove(t, probe)
+			}
+			plan, err := BuildPlan([]string{root}, PlanOptions{Recursive: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.swap(t, root)
+
+			srv := testserver.New(t)
+			results := map[string]Result{}
+			r := Runner{Client: newClient(t, srv, testserver.DefaultKey), OnResult: func(res Result) {
+				rel, _ := filepath.Rel(root, res.Item.Path)
+				results[filepath.ToSlash(rel)] = res
+			}}
+			r.Run(context.Background(), plan.Selected())
+
+			bad := "a.jpg"
+			if strings.HasPrefix(tc.name, "parent") {
+				bad = "sub/a.jpg"
+			}
+			if res := results[bad]; res.Status != StatusFailed || !strings.Contains(res.Err.Error(), tc.want) {
+				t.Fatalf("%s = %+v", bad, res)
+			}
+			for name, a := range srv.CompletedByName() {
+				if a.Size == 6 && a.SHA256 == sha256Hex("SECRET") {
+					t.Fatalf("uploaded %s from outside the listed tree", name)
+				}
+			}
+			if n := srv.Count(testserver.RouteCreate); n != 1 {
+				t.Fatalf("creates = %d, want 1 (only the untouched file)", n)
+			}
+		})
+	}
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func mustRemove(t *testing.T, p string) {
+	t.Helper()
+	if err := os.RemoveAll(p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+}

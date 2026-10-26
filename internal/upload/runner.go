@@ -362,11 +362,17 @@ func isUploadNotFound(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == api.CodeUploadNotFound
 }
 
-// openForUpload opens a planned file and checks it still has the planned
-// size.
+// openForUpload opens a planned file without following a symbolic link
+// (where the OS allows) and checks that it is still the regular file that
+// was planned, with the planned size. A file or parent directory replaced
+// since planning (by a symlink or anything else) is refused, so nothing
+// outside what was listed is uploaded.
 func openForUpload(it Item) (*os.File, int64, error) {
-	f, err := os.Open(it.Path)
+	f, err := openNoFollow(it.Path)
 	if err != nil {
+		if isSymlinkError(err) {
+			return nil, 0, errors.New("the file was replaced by a symbolic link since it was listed")
+		}
 		return nil, 0, fmt.Errorf("open: %w", unwrapPathError(err))
 	}
 	info, err := f.Stat()
@@ -374,9 +380,16 @@ func openForUpload(it Item) (*os.File, int64, error) {
 		f.Close()
 		return nil, 0, fmt.Errorf("stat: %w", unwrapPathError(err))
 	}
-	if info.Size() != it.Size {
+	switch {
+	case !info.Mode().IsRegular():
 		f.Close()
-		return nil, 0, fmt.Errorf("file changed since it was listed (now %d bytes, was %d)", info.Size(), it.Size)
+		return nil, 0, errors.New("the path is no longer a regular file")
+	case it.info != nil && !os.SameFile(it.info, info):
+		f.Close()
+		return nil, 0, errors.New("the file was replaced since it was listed")
+	case info.Size() != it.Size:
+		f.Close()
+		return nil, 0, fmt.Errorf("the file changed since it was listed (now %d bytes, was %d)", info.Size(), it.Size)
 	}
 	return f, info.Size(), nil
 }

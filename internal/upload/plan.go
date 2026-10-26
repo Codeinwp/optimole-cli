@@ -63,6 +63,9 @@ type Item struct {
 	// StatusFailed with Reason.
 	Status Status
 	Reason string
+	// info is what planning saw (lstat), to check at upload time that the
+	// path still names the same regular file.
+	info fs.FileInfo
 }
 
 // PlanOptions controls the planner.
@@ -120,7 +123,7 @@ func BuildPlan(args []string, opts PlanOptions) (*Plan, error) {
 			return nil, usageErrorf("invalid --exclude pattern %q: %v", pattern, err)
 		}
 	}
-	b := &builder{opts: opts, plan: &Plan{}, seen: map[string]bool{}}
+	b := &builder{opts: opts, plan: &Plan{}, ids: map[any]bool{}, byPath: map[string][]fs.FileInfo{}}
 	for _, arg := range args {
 		if err := b.addArg(arg); err != nil {
 			return nil, err
@@ -132,10 +135,15 @@ func BuildPlan(args []string, opts PlanOptions) (*Plan, error) {
 type builder struct {
 	opts PlanOptions
 	plan *Plan
-	seen map[string]bool
+	// ids and byPath remember the files already planned, by identity.
+	ids    map[any]bool
+	byPath map[string][]fs.FileInfo
 }
 
 func (b *builder) addArg(arg string) error {
+	// Without trailing separators, so that "link/" is seen as the symlink
+	// it is rather than as the directory it points to.
+	arg = filepath.Clean(arg)
 	info, err := os.Lstat(arg)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -157,7 +165,7 @@ func (b *builder) addArg(arg string) error {
 			b.plan.Ignored++
 			return nil
 		}
-		return b.addFile(arg, info.Size(), "")
+		return b.addFile(arg, info, "")
 	default:
 		b.skip(arg, "not a regular file")
 	}
@@ -209,20 +217,18 @@ func (b *builder) walk(root string) error {
 		if dir == "." {
 			dir = ""
 		}
-		return b.addFile(p, info.Size(), dir)
+		return b.addFile(p, info, dir)
 	})
 }
 
 // addFile plans one regular file; subdir is its directory relative to the
 // argument root ("" for the root itself).
-func (b *builder) addFile(p string, size int64, subdir string) error {
-	if abs, err := filepath.Abs(p); err == nil {
-		if b.seen[abs] {
-			return nil
-		}
-		b.seen[abs] = true
+func (b *builder) addFile(p string, info fs.FileInfo, subdir string) error {
+	if b.seenBefore(p, info) {
+		return nil
 	}
-	it := Item{Path: p, Size: size, Status: StatusPlanned}
+	size := info.Size()
+	it := Item{Path: p, Size: size, Status: StatusPlanned, info: info}
 	if err := CheckFilename(filepath.Base(p)); err != nil {
 		it.Status, it.Reason = StatusSkipped, err.Error()
 	} else if err := CheckSize(size); err != nil {
@@ -251,8 +257,46 @@ func (b *builder) addFile(p string, size int64, subdir string) error {
 		}
 		it.Dest = Destination{Path: folder}
 	}
+	if it.Status == StatusPlanned {
+		pinIdentity(info)
+	}
 	b.plan.Items = append(b.plan.Items, it)
 	return nil
+}
+
+// seenBefore reports whether the file was already planned under another
+// name: the same path twice, a case alias on a case-insensitive file system,
+// or a path through a symlinked parent. Files are compared by identity
+// (device and inode where available), so distinct files whose names differ
+// only in case stay distinct on case-sensitive file systems.
+func (b *builder) seenBefore(p string, info fs.FileInfo) bool {
+	if id, ok := fileIdentity(info); ok {
+		if b.ids[id] {
+			return true
+		}
+		b.ids[id] = true
+		return false
+	}
+	key := p
+	if abs, err := filepath.Abs(p); err == nil {
+		key = abs
+	}
+	key = strings.ToLower(key)
+	for _, prev := range b.byPath[key] {
+		if os.SameFile(prev, info) {
+			return true
+		}
+	}
+	b.byPath[key] = append(b.byPath[key], info)
+	return false
+}
+
+// pinIdentity makes a FileInfo remember which file it describes. On Windows
+// os.SameFile reads the file ID lazily, by path; reading it now ties the
+// info to the file seen while planning, not to whatever the path names at
+// upload time. Elsewhere the identity is already in the info.
+func pinIdentity(info fs.FileInfo) {
+	os.SameFile(info, info)
 }
 
 func (b *builder) skip(p, reason string) {

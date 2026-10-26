@@ -189,6 +189,51 @@ func TestPlanSymlinksAreNotFollowed(t *testing.T) {
 	}
 }
 
+// TestPlanTrailingSlashSymlink: "link/" resolves to the directory on most
+// systems; the argument is cleaned first, so the symlink is still refused.
+func TestPlanTrailingSlashSymlink(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "real/a.jpg", 1)
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(root, "real"), link); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+	for _, arg := range []string{link + string(filepath.Separator), link + "/", link + "/."} {
+		plan, err := BuildPlan([]string{arg}, PlanOptions{Recursive: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plan.Items) != 1 || plan.Items[0].Status != StatusSkipped || plan.Items[0].Reason != "symbolic link (not followed)" {
+			t.Fatalf("%s: plan = %+v", arg, plan.Items)
+		}
+	}
+}
+
+// TestPlanCaseAliases: on a case-insensitive file system "a.jpg" and "A.JPG"
+// are one file and must be uploaded once; on a case-sensitive one they are
+// two files and both are kept.
+func TestPlanCaseAliases(t *testing.T) {
+	root := t.TempDir()
+	lower := writeFile(t, root, "photo.jpg", 3)
+	upper := filepath.Join(root, "PHOTO.JPG")
+	_, err := os.Lstat(upper)
+	insensitive := err == nil
+	if !insensitive {
+		writeFile(t, root, "PHOTO.JPG", 5)
+	}
+	plan, err := BuildPlan([]string{lower, upper, root}, PlanOptions{Recursive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 2
+	if insensitive {
+		want = 1
+	}
+	if n := len(plan.Selected()); n != want {
+		t.Fatalf("case-insensitive=%v: %d files planned, want %d: %+v", insensitive, n, want, plan.Items)
+	}
+}
+
 func TestPlanUsageErrors(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "a.jpg", 1)
