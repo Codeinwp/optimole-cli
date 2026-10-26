@@ -112,28 +112,43 @@ func TestThreeStepHappyPath(t *testing.T) {
 	}
 }
 
-// TestImagesSignContentDisposition: for images the server signs
-// Content-Disposition: attachment too, and storage refuses a PUT without it.
-func TestImagesSignContentDisposition(t *testing.T) {
+// TestSVGSignsContentDisposition: for SVG the server also signs
+// Content-Disposition: attachment, and storage refuses a PUT without it;
+// other images get only Content-Type. The client sends whatever is listed.
+func TestSVGSignsContentDisposition(t *testing.T) {
 	srv := testserver.New(t)
 	c, _ := newTestClient(t, srv.URL)
 	ctx := context.Background()
+	for _, name := range []string{"icon.svg", "icon.svgz"} {
+		created, err := c.CreateAsset(ctx, CreateAssetRequest{Filename: name, Size: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, _ := created.Target()
+		if len(target.Headers) != 2 || target.Headers["Content-Disposition"] != "attachment" || target.Headers["Content-Type"] != "image/svg+xml" {
+			t.Fatalf("%s: headers = %v", name, target.Headers)
+		}
+		partial := target
+		partial.Headers = map[string]string{"Content-Type": "image/svg+xml"}
+		var se *StorageError
+		if err := c.PutObject(ctx, partial, strings.NewReader("abc"), 3); !errors.As(err, &se) || se.StatusCode != 403 {
+			t.Fatalf("%s: PUT without Content-Disposition: %v", name, err)
+		}
+		if err := c.PutObject(ctx, target, strings.NewReader("abc"), 3); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+
 	created, err := c.CreateAsset(ctx, CreateAssetRequest{Filename: "a.png", Size: 3, FolderPath: "/Brand/Logos/", CreateFolders: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := srv.FolderPath(created.Asset.FolderID.Value); got != "Brand/Logos" {
-		t.Fatalf("folder = %q", got)
+		t.Fatalf("folder = %q (leading and trailing slashes are trimmed)", got)
 	}
 	target, _ := created.Target()
-	if target.Headers["Content-Disposition"] != "attachment" || target.Headers["Content-Type"] != "image/png" {
-		t.Fatalf("headers = %v", target.Headers)
-	}
-	partial := target
-	partial.Headers = map[string]string{"Content-Type": "image/png"}
-	var se *StorageError
-	if err := c.PutObject(ctx, partial, strings.NewReader("abc"), 3); !errors.As(err, &se) || se.StatusCode != 403 {
-		t.Fatalf("PUT without Content-Disposition: %v", err)
+	if len(target.Headers) != 1 || target.Headers["Content-Type"] != "image/png" {
+		t.Fatalf("png headers = %v, want only Content-Type", target.Headers)
 	}
 	if err := c.PutObject(ctx, target, strings.NewReader("abc"), 3); err != nil {
 		t.Fatal(err)

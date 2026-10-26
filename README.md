@@ -92,7 +92,8 @@ optimole upload -r ./photos --folder Campaigns --json | jq -r 'select(.status=="
 ```
 
 Each file is uploaded in three steps: the CLI reserves an asset (`POST /api/assets`), streams the file
-straight to storage with the presigned `PUT` (never loading it into memory), then completes it
+straight to storage with the presigned `PUT` (never loading it into memory, and sending exactly the headers
+the server signed: `Content-Type`, plus `Content-Disposition: attachment` for SVG), then completes it
 (`POST /api/assets/{key}/completion`, with the image width and height for JPEG, PNG and GIF). The CDN URL
 from the completion answer is printed.
 

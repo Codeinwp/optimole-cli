@@ -524,10 +524,10 @@ func (s *Server) uploadTTL() time.Duration {
 }
 
 // signedHeaders are the headers the presigned URL signs: the type, and for
-// images Content-Disposition: attachment.
+// SVG (which can carry scripts) Content-Disposition: attachment.
 func signedHeaders(contentType string) map[string]string {
 	h := map[string]string{"Content-Type": contentType}
-	if strings.HasPrefix(contentType, "image/") {
+	if contentType == "image/svg+xml" {
 		h["Content-Disposition"] = "attachment"
 	}
 	return h
@@ -920,7 +920,7 @@ func contentType(name string) (string, bool) {
 		return "image/gif", true
 	case "webp":
 		return "image/webp", true
-	case "svg":
+	case "svg", "svgz":
 		return "image/svg+xml", true
 	case "mp4":
 		return "video/mp4", true

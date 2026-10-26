@@ -88,11 +88,13 @@ func TestRunHappyPath(t *testing.T) {
 	root := t.TempDir()
 	img := pngBytes(t, 3, 2)
 	writeBytes(t, root, "logo.png", img)
+	// SVG uploads carry the signed Content-Disposition header too.
+	writeBytes(t, root, "icon.svg", []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`))
 	writeBytes(t, root, "docs/readme.txt", []byte("hello"))
 	srv.AddFolder("Brand")
 
 	results, out := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{Folder: "brand"}, Runner{Concurrency: 2, CreateFolders: true})
-	if out.Uploaded != 2 || out.Failed != 0 || out.Stopped != nil {
+	if out.Uploaded != 3 || out.Failed != 0 || out.Stopped != nil {
 		t.Fatalf("outcome = %+v, results = %+v", out, results)
 	}
 	logo := results["logo.png"]
@@ -111,8 +113,11 @@ func TestRunHappyPath(t *testing.T) {
 	if got := srv.FolderPaths(); strings.Join(got, ",") != "Brand,Brand/docs" {
 		t.Fatalf("folders = %v", got)
 	}
-	if n := srv.Count(testserver.RouteCreate) + srv.Count(testserver.RoutePut) + srv.Count(testserver.RouteComplete); n != 6 {
-		t.Fatalf("requests = %d, want 6", n)
+	if a := assets["icon.svg"]; a.HadHints || a.ContentType != "image/svg+xml" {
+		t.Fatalf("svg asset = %+v", a)
+	}
+	if n := srv.Count(testserver.RouteCreate) + srv.Count(testserver.RoutePut) + srv.Count(testserver.RouteComplete); n != 9 {
+		t.Fatalf("requests = %d, want 9", n)
 	}
 }
 
