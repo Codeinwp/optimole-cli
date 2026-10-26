@@ -219,9 +219,14 @@ func (b *builder) addArg(arg string) error {
 // Windows is different: it applies ".." to the path text before it looks at
 // any link, and "\photos" or "D:photos" are relative to a drive, not to the
 // working directory. filepath.Abs follows exactly those rules there, so the
-// path is made absolute first and its links resolved after.
+// path is made absolute first and its links resolved after. An extended path
+// ("\\?\C:\photos.") is refused: Windows opens it without that clean-up, but
+// filepath.Abs would still apply it and could name another directory.
 func physicalDir(arg string) (string, error) {
 	if runtime.GOOS == "windows" {
+		if isExtendedPath(arg) {
+			return "", errors.New(`extended (\\?\) paths are not supported for directories; use the normal path`)
+		}
 		abs, err := filepath.Abs(arg)
 		if err != nil {
 			return "", err
@@ -244,6 +249,16 @@ func physicalDir(arg string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(wd, resolved), nil
+}
+
+// isExtendedPath reports a Windows path that skips the usual path clean-up
+// ("\\?\..." or "\??\..."). Forward-slash spellings are included, to be safe.
+func isExtendedPath(p string) bool {
+	isSep := func(c byte) bool { return c == '/' || c == '\\' }
+	if len(p) < 4 || !isSep(p[0]) || !isSep(p[3]) {
+		return false
+	}
+	return isSep(p[1]) && p[2] == '?' || p[1] == '?' && p[2] == '?'
 }
 
 // displayArg is how an argument is shown: as typed, tidied with

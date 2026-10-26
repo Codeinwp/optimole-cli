@@ -292,7 +292,8 @@ func TestPlanRejectsFilesWhoseIdentityCannotBePinned(t *testing.T) {
 // TestPlanWalksThePhysicalRoot: work/link points to data/leaf, data/album is
 // a real directory and work/album points to secrets. "work/link/.." is data,
 // physically; walking it lexically would list data but descend through
-// work/album into secrets.
+// work/album into secrets. On Windows ".." is applied to the text first, so
+// the argument is work itself.
 func TestPlanWalksThePhysicalRoot(t *testing.T) {
 	base := t.TempDir()
 	writeFile(t, base, "data/leaf/.keep", 1)
@@ -316,6 +317,20 @@ func TestPlanWalksThePhysicalRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	selected := plan.Selected()
+	if runtime.GOOS == "windows" {
+		// Windows applies ".." to the path text first: the argument is work,
+		// whose only entries are the two symlinks, and neither is followed.
+		skipped := 0
+		for _, it := range plan.Items {
+			if it.Status == StatusSkipped {
+				skipped++
+			}
+		}
+		if len(selected) != 0 || skipped != 2 {
+			t.Fatalf("items = %+v; want none selected and both symlinks skipped", plan.Items)
+		}
+		return
+	}
 	if len(selected) != 2 {
 		t.Fatalf("selected = %+v", selected)
 	}
@@ -418,6 +433,41 @@ func TestPlanWindowsDriveRootedArgument(t *testing.T) {
 	selected := plan.Selected()
 	if len(selected) != 1 || filepath.Base(selected[0].Path) != "right.jpg" {
 		t.Fatalf("selected %+v, want only photos\\right.jpg at the drive root", selected)
+	}
+}
+
+// TestPlanRefusesWindowsExtendedDirectory: "\\?\C:\photos." is opened
+// without clean-up, so it cannot be resolved safely and is refused.
+func TestPlanRefusesWindowsExtendedDirectory(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("extended paths exist only on Windows")
+	}
+	base := t.TempDir()
+	writeFile(t, base, "photos/a.jpg", 1)
+	_, err := BuildPlan(context.Background(), []string{`\\?\` + filepath.Join(base, "photos")}, PlanOptions{Recursive: true})
+	var usage *UsageError
+	if !errors.As(err, &usage) || !strings.Contains(err.Error(), "extended") {
+		t.Fatalf("err = %v, want a usage error about extended paths", err)
+	}
+}
+
+func TestIsExtendedPath(t *testing.T) {
+	cases := map[string]bool{
+		`\\?\C:\photos.`: true,
+		`\\?\UNC\srv\s`:  true,
+		`//?/C:/photos`:  true,
+		`\??\C:\photos`:  true,
+		`\\.\C:\photos`:  false,
+		`\\srv\share\x`:  false,
+		`C:\photos`:      false,
+		`\photos`:        false,
+		`\\?`:            false,
+		`?\x\y`:          false,
+	}
+	for in, want := range cases {
+		if got := isExtendedPath(in); got != want {
+			t.Errorf("isExtendedPath(%q) = %v, want %v", in, got, want)
+		}
 	}
 }
 
