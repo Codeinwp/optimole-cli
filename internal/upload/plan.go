@@ -80,6 +80,9 @@ type PlanOptions struct {
 	// Excludes are path.Match patterns, tried against the path relative to
 	// the argument root and against the base name.
 	Excludes []string
+
+	// pin replaces pinIdentity in tests.
+	pin func(fs.FileInfo) bool
 }
 
 // Plan is the planner's result.
@@ -127,7 +130,10 @@ func BuildPlan(ctx context.Context, args []string, opts PlanOptions) (*Plan, err
 			return nil, usageErrorf("invalid --exclude pattern %q: %v", pattern, err)
 		}
 	}
-	b := &builder{ctx: ctx, opts: opts, plan: &Plan{}, planned: newIdentitySet(), others: newIdentitySet()}
+	b := &builder{ctx: ctx, opts: opts, plan: &Plan{}, planned: newIdentitySet(), others: newIdentitySet(), pin: pinIdentity}
+	if opts.pin != nil {
+		b.pin = opts.pin
+	}
 	for _, arg := range args {
 		if err := ctx.Err(); err != nil {
 			return b.plan, err
@@ -151,6 +157,7 @@ type builder struct {
 	// ("a.exe") never hides an accepted hard link to the same file ("b.jpg").
 	planned *identitySet
 	others  *identitySet
+	pin     func(fs.FileInfo) bool
 }
 
 func (b *builder) addArg(arg string) error {
@@ -297,8 +304,10 @@ func (b *builder) addFile(p string, info fs.FileInfo, subdir string) error {
 		}
 		it.Dest = Destination{Path: folder}
 	}
-	if it.Status == StatusPlanned {
-		pinIdentity(info)
+	if it.Status == StatusPlanned && !b.pin(info) {
+		// Without a pinned identity the upload-time check could accept a
+		// same-size replacement, so the file is not uploaded.
+		it.Status, it.Reason = StatusFailed, "cannot read: the file changed while it was being listed"
 	}
 	// Identities are recorded only now, once the checks have decided which
 	// set the file belongs to.
@@ -351,12 +360,13 @@ func (s *identitySet) seen(p string, info fs.FileInfo) bool {
 	return false
 }
 
-// pinIdentity makes a FileInfo remember which file it describes. On Windows
-// os.SameFile reads the file ID lazily, by path; reading it now ties the
-// info to the file seen while planning, not to whatever the path names at
-// upload time. Elsewhere the identity is already in the info.
-func pinIdentity(info fs.FileInfo) {
-	os.SameFile(info, info)
+// pinIdentity makes a FileInfo remember which file it describes and reports
+// whether it could. On Windows os.SameFile reads the file ID lazily, by path;
+// reading it now ties the info to the file seen while planning, not to
+// whatever the path names at upload time, and it fails (false) when the file
+// is already gone. Elsewhere the identity is already in the info.
+func pinIdentity(info fs.FileInfo) bool {
+	return os.SameFile(info, info)
 }
 
 func (b *builder) skip(p, reason string) {

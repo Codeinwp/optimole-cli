@@ -3,6 +3,7 @@ package upload
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,6 +259,32 @@ func TestPlanRefusedHardLinkDoesNotHideAcceptedOne(t *testing.T) {
 	}
 	if len(plan.Items) != 1 {
 		t.Fatalf("plan = %+v", plan.Items)
+	}
+}
+
+// TestPlanRejectsFilesWhoseIdentityCannotBePinned: on Windows the file ID is
+// read by path while planning; if that fails (the file vanished), the upload
+// check would have nothing to compare with, so the file must not be planned.
+func TestPlanRejectsFilesWhoseIdentityCannotBePinned(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.jpg", 3)
+	writeFile(t, root, "b.jpg", 3)
+	pin := func(info fs.FileInfo) bool { return info.Name() != "a.jpg" }
+	plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{Recursive: true, pin: pin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := byRel(t, root, plan)
+	if a := got["a.jpg"]; a.status != StatusFailed || !strings.Contains(a.reason, "changed while it was being listed") {
+		t.Fatalf("a.jpg = %+v", a)
+	}
+	if got["b.jpg"].status != StatusPlanned || len(plan.Selected()) != 1 {
+		t.Fatalf("plan = %+v", plan.Items)
+	}
+	// The real pin works on files that exist.
+	info, err := os.Lstat(filepath.Join(root, "b.jpg"))
+	if err != nil || !pinIdentity(info) {
+		t.Fatalf("pinIdentity(existing file) = false, %v", err)
 	}
 }
 
