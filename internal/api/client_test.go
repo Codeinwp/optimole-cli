@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -368,12 +369,12 @@ func TestRetryAfterIsHonoured(t *testing.T) {
 func TestRetryableStatusesUseJitteredBackoff(t *testing.T) {
 	for _, status := range []int{429, 502, 503, 504} {
 		srv := testserver.New(t)
-		srv.Inject(testserver.RouteCreate,
-			testserver.Response{Status: status, Body: `{"code":"upload_service_unavailable","message":"try again"}`},
+		srv.Inject(testserver.RouteFolders,
+			testserver.Response{Status: status, Body: `{"message":"try again"}`},
 			testserver.Response{Status: status, Body: `{"message":"try again"}`},
 		)
 		c, sl := newTestClient(t, srv.URL)
-		if _, err := c.CreateAsset(context.Background(), CreateAssetRequest{Filename: "a.png", Size: 1}); err != nil {
+		if _, err := c.ListFolders(context.Background(), FolderQuery{}); err != nil {
 			t.Fatalf("status %d: %v", status, err)
 		}
 		got := sl.all()
@@ -387,6 +388,74 @@ func TestRetryableStatusesUseJitteredBackoff(t *testing.T) {
 				t.Errorf("status %d: sleep %d = %v, want in [%v, %v]", status, i, d, full/2, full)
 			}
 		}
+	}
+}
+
+// TestCreateRetriesOnlyUncommittedFailures: a repeated POST /assets reserves
+// a second asset, so creation is retried only when nothing was reserved.
+func TestCreateRetriesOnlyUncommittedFailures(t *testing.T) {
+	retried := []testserver.Response{
+		{Status: 429, Body: `{"message":"Too Many Attempts."}`},
+		{Status: 503, Body: `{"code":"upload_service_unavailable","message":"Storage is unavailable."}`},
+	}
+	for _, resp := range retried {
+		srv := testserver.New(t)
+		srv.Inject(testserver.RouteCreate, resp)
+		c, sl := newTestClient(t, srv.URL)
+		if _, err := c.CreateAsset(context.Background(), CreateAssetRequest{Filename: "a.png", Size: 1}); err != nil {
+			t.Fatalf("%d: %v", resp.Status, err)
+		}
+		if n := srv.Count(testserver.RouteCreate); n != 2 || len(sl.all()) != 1 {
+			t.Fatalf("%d: creates = %d, sleeps = %d", resp.Status, n, len(sl.all()))
+		}
+	}
+
+	notRetried := map[string]testserver.Response{
+		"502":                       {Status: 502, Body: `<html>Bad Gateway</html>`, Header: map[string]string{"Content-Type": "text/html"}},
+		"504":                       {Status: 504, Body: `{"message":"Gateway Timeout"}`},
+		"503 without the code":      {Status: 503, Body: `{"message":"Service Unavailable"}`},
+		"reserved, then dropped":    {CommitThenClose: true},
+		"dropped after it was sent": {CloseConn: true},
+	}
+	for name, resp := range notRetried {
+		srv := testserver.New(t)
+		srv.Inject(testserver.RouteCreate, resp)
+		c, sl := newTestClient(t, srv.URL)
+		_, err := c.CreateAsset(context.Background(), CreateAssetRequest{Filename: "a.png", Size: 1})
+		if err == nil {
+			t.Fatalf("%s: no error", name)
+		}
+		if n := srv.Count(testserver.RouteCreate); n != 1 || len(sl.all()) != 0 {
+			t.Fatalf("%s: creates = %d, sleeps = %d; want 1 and 0", name, n, len(sl.all()))
+		}
+		var ne *NetworkError
+		if resp.Status == 0 && (!errors.As(err, &ne) || !ne.MaybeCommitted || !strings.Contains(err.Error(), "not retried")) {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+	}
+	// Nothing was retried, so at most one asset was reserved per attempt.
+}
+
+func TestCreateRetriesConnectionFailures(t *testing.T) {
+	srv := testserver.New(t)
+	var dials atomic.Int32
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if dials.Add(1) == 1 {
+			return nil, &net.OpError{Op: "dial", Net: network, Err: errors.New("connection refused")}
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	sl := &sleeps{}
+	c, err := New(Options{BaseURL: srv.URL, APIKey: testserver.DefaultKey, UserAgent: "optimole-cli/test", Sleep: sl.sleep, Transport: tr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateAsset(context.Background(), CreateAssetRequest{Filename: "a.png", Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.Count(testserver.RouteCreate); n != 1 || len(sl.all()) != 1 || dials.Load() != 2 {
+		t.Fatalf("creates = %d, sleeps = %d, dials = %d", n, len(sl.all()), dials.Load())
 	}
 }
 
@@ -489,9 +558,10 @@ func TestErrorDetails(t *testing.T) {
 		t.Fatalf("validation text = %q", err)
 	}
 
-	// A non-JSON 502 is retried; then the fake answers normally.
-	if _, err := c.CreateAsset(context.Background(), req); err != nil {
-		t.Fatal(err)
+	// A non-JSON 502 is reported with its content type.
+	_, err = c.CreateAsset(context.Background(), req)
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 502 || !strings.Contains(err.Error(), "unexpected non-JSON response (text/html)") {
+		t.Fatalf("502 error = %v", err)
 	}
 }
 

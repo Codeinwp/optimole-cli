@@ -91,13 +91,23 @@ type NetworkError struct {
 	Op       string
 	Err      error
 	Attempts int
+	// MaybeCommitted is set when the request may have reached the server,
+	// so it was not repeated.
+	MaybeCommitted bool
 }
 
 func (e *NetworkError) Error() string {
+	var notes []string
 	if e.Attempts > 1 {
-		return fmt.Sprintf("%s: %v (after %d attempts)", e.Op, e.Err, e.Attempts)
+		notes = append(notes, fmt.Sprintf("after %d attempts", e.Attempts))
 	}
-	return fmt.Sprintf("%s: %v", e.Op, e.Err)
+	if e.MaybeCommitted {
+		notes = append(notes, "not retried: the server may have received it")
+	}
+	if len(notes) == 0 {
+		return fmt.Sprintf("%s: %v", e.Op, e.Err)
+	}
+	return fmt.Sprintf("%s: %v (%s)", e.Op, e.Err, strings.Join(notes, "; "))
 }
 
 func (e *NetworkError) Unwrap() error { return e.Err }

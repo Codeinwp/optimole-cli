@@ -302,6 +302,24 @@ func TestRunExpiredAfterUncertainPut(t *testing.T) {
 	})
 }
 
+// TestRunCreateCommittedThenDropped: the server reserved the asset but the
+// answer was lost. Repeating the request would reserve a second asset, which
+// the server's cleanup could publish, so the file fails instead.
+func TestRunCreateCommittedThenDropped(t *testing.T) {
+	srv := testserver.New(t)
+	srv.Inject(testserver.RouteCreate, testserver.Response{CommitThenClose: true})
+	root := t.TempDir()
+	writeBytes(t, root, "a.jpg", []byte("abc"))
+	results, out := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{}, Runner{})
+	var ne *api.NetworkError
+	if out.Failed != 1 || !errors.As(results["a.jpg"].Err, &ne) || !ne.MaybeCommitted {
+		t.Fatalf("result = %+v", results["a.jpg"])
+	}
+	if c, a := srv.Count(testserver.RouteCreate), len(srv.Assets()); c != 1 || a != 1 {
+		t.Fatalf("creates = %d, reserved assets = %d; want 1 and 1", c, a)
+	}
+}
+
 func TestRunCompletionErrors(t *testing.T) {
 	t.Run("409 is not retried", func(t *testing.T) {
 		srv := testserver.New(t)

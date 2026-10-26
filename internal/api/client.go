@@ -12,10 +12,12 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -161,7 +163,7 @@ func checkURL(raw string) (*url.URL, error) {
 // CreateAsset reserves an asset and returns where to upload its bytes.
 func (c *Client) CreateAsset(ctx context.Context, req CreateAssetRequest) (*CreateAssetResponse, error) {
 	var out CreateAssetResponse
-	if err := c.doJSON(ctx, OpCreateAsset, http.MethodPost, c.endpoint("assets"), req, &out); err != nil {
+	if err := c.doJSON(ctx, OpCreateAsset, http.MethodPost, c.endpoint("assets"), req, &out, retryUncommitted); err != nil {
 		return nil, err
 	}
 	if !assetKeyPattern.MatchString(out.Asset.Key) {
@@ -279,7 +281,7 @@ func (c *Client) CompleteAsset(ctx context.Context, key string, dims *Dimensions
 		body = dims
 	}
 	var raw json.RawMessage
-	if err := c.doJSON(ctx, OpCompleteUpload, http.MethodPost, c.endpoint("assets", strings.ToLower(key), "completion"), body, &raw); err != nil {
+	if err := c.doJSON(ctx, OpCompleteUpload, http.MethodPost, c.endpoint("assets", strings.ToLower(key), "completion"), body, &raw, retryIdempotent); err != nil {
 		return nil, err
 	}
 	return decodeAsset(raw)
@@ -323,7 +325,7 @@ func (c *Client) ListFolders(ctx context.Context, q FolderQuery) (*FolderPage, e
 	}
 	u.RawQuery = v.Encode()
 	var page FolderPage
-	if err := c.doJSON(ctx, OpListFolders, http.MethodGet, u, nil, &page); err != nil {
+	if err := c.doJSON(ctx, OpListFolders, http.MethodGet, u, nil, &page, retryIdempotent); err != nil {
 		return nil, err
 	}
 	return &page, nil
@@ -333,9 +335,29 @@ func (c *Client) endpoint(parts ...string) *url.URL {
 	return c.base.JoinPath(parts...)
 }
 
-// retryableStatus lists the dashboard answers that are worth another try.
-func retryableStatus(code int) bool {
-	switch code {
+// retryMode says which failures of a call may be retried.
+type retryMode int
+
+const (
+	// retryIdempotent is for calls that are safe to repeat (listing,
+	// completion): 429, 502, 503, 504 and any network error.
+	retryIdempotent retryMode = iota
+	// retryUncommitted is for asset creation, where a repeat reserves a
+	// second asset. Only failures that prove nothing was reserved are
+	// retried: 429 (refused before the action), 503 with
+	// upload_service_unavailable (the server deletes the reservation before
+	// answering), and connection errors before the request was sent (DNS,
+	// dial, TLS handshake).
+	retryUncommitted
+)
+
+// retryableStatus reports whether an HTTP error is worth another try.
+func (m retryMode) retryableStatus(e *Error) bool {
+	if m == retryUncommitted {
+		return e.StatusCode == http.StatusTooManyRequests ||
+			(e.StatusCode == http.StatusServiceUnavailable && e.Code == CodeUploadServiceUnavailable)
+	}
+	switch e.StatusCode {
 	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
 	}
@@ -343,9 +365,9 @@ func retryableStatus(code int) bool {
 }
 
 // doJSON sends a JSON request to the dashboard and decodes a 2xx answer into
-// out. It retries 429 (honouring Retry-After), 502/503/504 and network errors
-// with capped, jittered exponential backoff, up to MaxAttempts calls.
-func (c *Client) doJSON(ctx context.Context, op, method string, u *url.URL, in, out any) error {
+// out. It retries what mode allows with capped, jittered exponential backoff
+// (or the Retry-After delay), up to MaxAttempts calls.
+func (c *Client) doJSON(ctx context.Context, op, method string, u *url.URL, in, out any, mode retryMode) error {
 	var payload []byte
 	if in != nil {
 		var err error
@@ -370,7 +392,7 @@ func (c *Client) doJSON(ctx context.Context, op, method string, u *url.URL, in, 
 			req.Header.Set("Content-Type", "application/json")
 		}
 
-		wait, retry, err := c.roundTrip(ctx, op, req, attempt, out)
+		wait, retry, err := c.roundTrip(ctx, op, req, attempt, out, mode)
 		if err == nil {
 			return nil
 		}
@@ -387,13 +409,25 @@ func (c *Client) doJSON(ctx context.Context, op, method string, u *url.URL, in, 
 
 // roundTrip makes one attempt. It returns how long to wait before the next
 // attempt and whether one should be made.
-func (c *Client) roundTrip(ctx context.Context, op string, req *http.Request, attempt int, out any) (time.Duration, bool, error) {
+func (c *Client) roundTrip(ctx context.Context, op string, req *http.Request, attempt int, out any, mode retryMode) (time.Duration, bool, error) {
+	// A request that never got a connection cannot have reached the server.
+	var connected atomic.Bool
+	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+
 	resp, err := c.dashboard.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, false, ctxErr
 		}
-		return c.backoff(attempt), true, &NetworkError{Op: op, Err: stripURL(err), Attempts: attempt}
+		netErr := &NetworkError{Op: op, Err: stripURL(err), Attempts: attempt}
+		if mode == retryUncommitted && connected.Load() {
+			// The server may have reserved the asset; repeating could leave
+			// a duplicate for its cleanup to publish.
+			netErr.MaybeCommitted = true
+			return 0, false, netErr
+		}
+		return c.backoff(attempt), true, netErr
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
@@ -401,7 +435,12 @@ func (c *Client) roundTrip(ctx context.Context, op string, req *http.Request, at
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, false, ctxErr
 		}
-		return c.backoff(attempt), true, &NetworkError{Op: op, Err: fmt.Errorf("reading the response: %w", err), Attempts: attempt}
+		netErr := &NetworkError{Op: op, Err: fmt.Errorf("reading the response: %w", err), Attempts: attempt}
+		if mode == retryUncommitted {
+			netErr.MaybeCommitted = true
+			return 0, false, netErr
+		}
+		return c.backoff(attempt), true, netErr
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if out == nil {
@@ -414,7 +453,7 @@ func (c *Client) roundTrip(ctx context.Context, op string, req *http.Request, at
 	}
 	apiErr := parseError(op, resp, body, c.now())
 	apiErr.Attempts = attempt
-	if !retryableStatus(resp.StatusCode) {
+	if !mode.retryableStatus(apiErr) {
 		return 0, false, apiErr
 	}
 	wait := apiErr.RetryAfter
