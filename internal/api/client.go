@@ -192,7 +192,8 @@ func (c *Client) PutObject(ctx context.Context, t UploadTarget, r io.ReaderAt, s
 				return &StorageError{Err: fmt.Errorf("the upload was signed for %s bytes but the file has %d", v, size)}
 			}
 		case "Host":
-			req.Host = v
+			// The URL names the storage host; a header must not send the bytes elsewhere.
+			continue
 		default:
 			req.Header.Set(k, v)
 		}
