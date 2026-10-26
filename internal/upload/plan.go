@@ -127,7 +127,7 @@ func BuildPlan(ctx context.Context, args []string, opts PlanOptions) (*Plan, err
 			return nil, usageErrorf("invalid --exclude pattern %q: %v", pattern, err)
 		}
 	}
-	b := &builder{ctx: ctx, opts: opts, plan: &Plan{}, ids: map[any]bool{}, byPath: map[string][]fs.FileInfo{}}
+	b := &builder{ctx: ctx, opts: opts, plan: &Plan{}, planned: newIdentitySet(), others: newIdentitySet()}
 	for _, arg := range args {
 		if err := ctx.Err(); err != nil {
 			return b.plan, err
@@ -146,9 +146,11 @@ type builder struct {
 	ctx  context.Context
 	opts PlanOptions
 	plan *Plan
-	// ids and byPath remember the files already planned, by identity.
-	ids    map[any]bool
-	byPath map[string][]fs.FileInfo
+	// planned remembers the files to upload and others the skipped or
+	// failed ones, by identity. They are kept apart so that a refused name
+	// ("a.exe") never hides an accepted hard link to the same file ("b.jpg").
+	planned *identitySet
+	others  *identitySet
 }
 
 func (b *builder) addArg(arg string) error {
@@ -265,9 +267,6 @@ func (b *builder) walk(root string) error {
 // addFile plans one regular file; subdir is its directory relative to the
 // argument root ("" for the root itself).
 func (b *builder) addFile(p string, info fs.FileInfo, subdir string) error {
-	if b.seenBefore(p, info) {
-		return nil
-	}
 	size := info.Size()
 	it := Item{Path: p, Size: size, Status: StatusPlanned, info: info}
 	if err := CheckFilename(filepath.Base(p)); err != nil {
@@ -301,21 +300,41 @@ func (b *builder) addFile(p string, info fs.FileInfo, subdir string) error {
 	if it.Status == StatusPlanned {
 		pinIdentity(info)
 	}
+	// Identities are recorded only now, once the checks have decided which
+	// set the file belongs to.
+	set := b.others
+	if it.Status == StatusPlanned {
+		set = b.planned
+	}
+	if set.seen(p, info) {
+		return nil
+	}
 	b.plan.Items = append(b.plan.Items, it)
 	return nil
 }
 
-// seenBefore reports whether the file was already planned under another
-// name: the same path twice, a case alias on a case-insensitive file system,
-// or a path through a symlinked parent. Files are compared by identity
-// (device and inode where available), so distinct files whose names differ
-// only in case stay distinct on case-sensitive file systems.
-func (b *builder) seenBefore(p string, info fs.FileInfo) bool {
+// identitySet remembers files by identity: device and inode where
+// available, otherwise os.SameFile among case-folded absolute paths.
+type identitySet struct {
+	ids    map[any]bool
+	byPath map[string][]fs.FileInfo
+}
+
+func newIdentitySet() *identitySet {
+	return &identitySet{ids: map[any]bool{}, byPath: map[string][]fs.FileInfo{}}
+}
+
+// seen reports whether the file is already in the set, under this name or
+// another: the same path twice, a case alias on a case-insensitive file
+// system, a path through a symlinked parent, or a hard link. Otherwise it
+// adds the file. Distinct files whose names differ only in case stay
+// distinct on case-sensitive file systems.
+func (s *identitySet) seen(p string, info fs.FileInfo) bool {
 	if id, ok := fileIdentity(info); ok {
-		if b.ids[id] {
+		if s.ids[id] {
 			return true
 		}
-		b.ids[id] = true
+		s.ids[id] = true
 		return false
 	}
 	key := p
@@ -323,12 +342,12 @@ func (b *builder) seenBefore(p string, info fs.FileInfo) bool {
 		key = abs
 	}
 	key = strings.ToLower(key)
-	for _, prev := range b.byPath[key] {
+	for _, prev := range s.byPath[key] {
 		if os.SameFile(prev, info) {
 			return true
 		}
 	}
-	b.byPath[key] = append(b.byPath[key], info)
+	s.byPath[key] = append(s.byPath[key], info)
 	return false
 }
 

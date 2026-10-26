@@ -235,6 +235,32 @@ func TestPlanKeepsInnerDotDot(t *testing.T) {
 	}
 }
 
+// TestPlanRefusedHardLinkDoesNotHideAcceptedOne: "a.exe" and "b.jpg" are
+// one file; the refused name must not swallow the accepted one.
+func TestPlanRefusedHardLinkDoesNotHideAcceptedOne(t *testing.T) {
+	root := t.TempDir()
+	exe := writeFile(t, root, "a.exe", 4)
+	if err := os.Link(exe, filepath.Join(root, "b.jpg")); err != nil {
+		t.Skipf("cannot create hard links here: %v", err)
+	}
+	plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{Recursive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := byRel(t, root, plan)
+	if got["a.exe"].status != StatusSkipped || got["b.jpg"].status != StatusPlanned || len(plan.Selected()) != 1 {
+		t.Fatalf("plan = %+v", plan.Items)
+	}
+	// Named twice, the refused file is still listed once.
+	plan, err = BuildPlan(context.Background(), []string{exe, exe}, PlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Items) != 1 {
+		t.Fatalf("plan = %+v", plan.Items)
+	}
+}
+
 func TestTrimArg(t *testing.T) {
 	sep := string(filepath.Separator)
 	cases := map[string]string{
