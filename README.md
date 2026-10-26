@@ -168,7 +168,10 @@ All waits use capped exponential backoff with jitter (or the `Retry-After` delay
   unexpired (the signature pins the asset, size and type, so this is harmless). Only a `403` (expired or
   mismatched signature) or an expired URL leads to one new reservation. Whenever an earlier `PUT` may have
   stored the bytes (its answer was lost), the CLI asks the server to complete the original asset before
-  reserving another or giving up, so the file is neither duplicated nor reported failed by mistake.
+  reserving another or giving up. Because storage may still be finishing that `PUT`, a "not uploaded"
+  answer is asked again after about 2 s and 5 s; only after three such answers is a new asset reserved.
+  One small window remains: if storage completes the original `PUT` more than about 7 s after the CLI
+  stopped waiting for it, the server's hourly cleanup publishes that copy as well, next to the new one.
   Redirects from storage are refused, never followed.
 - **Completion and folder listing** are repeated on `429`, `502`, `503`, `504` and network errors.
 - Validation errors (other `4xx`) are never retried; the server's message, field errors and code are shown.

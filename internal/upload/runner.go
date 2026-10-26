@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Codeinwp/optimole-cli/internal/api"
 )
@@ -56,7 +57,16 @@ type Runner struct {
 	// stops the run like a fatal error (the CLI uses it when its output can
 	// no longer be written).
 	Abort func() error
+	// Sleep, when set, replaces the waits between completion probes.
+	Sleep func(ctx context.Context, d time.Duration) error
 }
+
+// Waits before the second and third completion probe after an uncertain
+// PUT; see settle.
+const (
+	settleWait1 = 2 * time.Second
+	settleWait2 = 5 * time.Second
+)
 
 // Outcome summarizes a run.
 type Outcome struct {
@@ -364,26 +374,65 @@ func (r *Runner) uploadOne(ctx context.Context, t task) Result {
 				// Retries ran out, but an attempt may have stored the bytes;
 				// the server's cleanup would publish them while we report a
 				// failure. Completing settles which it is.
-				if asset, cerr := r.Client.CompleteAsset(ctx, key, dims); cerr == nil {
+				if asset, _ := r.settle(ctx, key, dims); asset != nil {
 					res.Status, res.URL, res.Err = StatusUploaded, asset.URL, nil
 				}
 			}
 			return res
 		}
 		if se.Uncertain {
-			asset, cerr := r.Client.CompleteAsset(ctx, key, dims)
-			if cerr == nil {
+			asset, perr := r.settle(ctx, key, dims)
+			if asset != nil {
 				res.Status, res.URL, res.Err = StatusUploaded, asset.URL, nil
 				return res
 			}
-			if !isUploadNotFound(cerr) {
+			if perr != nil {
 				// Unknown whether the bytes landed: a new asset could be a duplicate.
-				res.Err = fmt.Errorf("%w; checking whether it was stored anyway: %v", err, cerr)
+				res.Err = fmt.Errorf("%w; checking whether it was stored anyway: %v", err, perr)
 				return res
 			}
 		}
 	}
 	return res
+}
+
+// settle asks the server whether the bytes of an uncertain PUT (no answer, or
+// a 5xx) reached storage, by completing the asset. One upload_not_found is not
+// proof: storage may still be finishing the original PUT, and if it does after
+// a new reservation, the server's cleanup publishes both. So it asks up to
+// three times, waiting settleWait1 and then settleWait2 in between. It returns
+// the asset when the bytes are there, nil and nil when every answer was
+// upload_not_found, and the probe's error (or the context's) otherwise.
+func (r *Runner) settle(ctx context.Context, key string, dims *api.Dimensions) (*api.Asset, error) {
+	for _, wait := range []time.Duration{0, settleWait1, settleWait2} {
+		if wait > 0 {
+			if err := r.sleep(ctx, wait); err != nil {
+				return nil, err
+			}
+		}
+		asset, err := r.Client.CompleteAsset(ctx, key, dims)
+		if err == nil {
+			return asset, nil
+		}
+		if !isUploadNotFound(err) {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+func (r *Runner) sleep(ctx context.Context, d time.Duration) error {
+	if r.Sleep != nil {
+		return r.Sleep(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 func isUploadNotFound(err error) bool {

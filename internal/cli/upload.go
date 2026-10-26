@@ -188,6 +188,7 @@ func runUpload(ctx context.Context, args []string, env Env) int {
 		// Results that cannot be written are results lost: stop starting
 		// new uploads once the output fails.
 		Abort: rep.Err,
+		Sleep: env.Sleep,
 	}
 	outcome := runner.Run(ctx, selected)
 	rep.Finish(plan.Ignored, false, outcome.Interrupted)

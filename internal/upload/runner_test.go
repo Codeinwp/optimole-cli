@@ -44,6 +44,9 @@ func run(t *testing.T, ctx context.Context, srv *testserver.Server, key string, 
 		t.Fatal(err)
 	}
 	r.Client = newClient(t, srv, key)
+	if r.Sleep == nil {
+		r.Sleep = noSleep
+	}
 	results := map[string]Result{}
 	var mu sync.Mutex
 	r.OnResult = func(res Result) {
@@ -298,15 +301,77 @@ func TestRunExpiredAfterUncertainPut(t *testing.T) {
 		srv.Inject(testserver.RoutePut, testserver.Response{CloseConn: true})
 		root := t.TempDir()
 		writeBytes(t, root, "a.jpg", []byte("abc"))
-		results, _ := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{}, Runner{})
+		var waits recordedSleeps
+		results, _ := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{}, Runner{Sleep: waits.sleep})
 		if r := results["a.jpg"]; r.Status != StatusUploaded {
 			t.Fatalf("result = %+v", r)
 		}
-		// Completion said upload_not_found, so a second asset was safe.
+		// Three upload_not_found answers, 2 s and 5 s apart, before a second
+		// asset was reserved.
 		if c := srv.Count(testserver.RouteCreate); c != 2 || len(srv.CompletedByName()) != 1 {
 			t.Fatalf("creates = %d, completed = %d", c, len(srv.CompletedByName()))
 		}
+		if got := waits.all(); len(got) != 2 || got[0] != settleWait1 || got[1] != settleWait2 {
+			t.Fatalf("waits = %v", got)
+		}
+		probes := 0
+		var firstCreate, secondCreate int64
+		for _, e := range srv.Events() {
+			switch {
+			case e.Route == testserver.RouteCreate && firstCreate == 0:
+				firstCreate = e.Start
+			case e.Route == testserver.RouteCreate:
+				secondCreate = e.Start
+			case e.Route == testserver.RouteComplete && e.Status == http.StatusConflict:
+				probes++
+				if e.Start > secondCreate && secondCreate != 0 {
+					t.Fatal("a probe came after the second reservation")
+				}
+			}
+		}
+		if probes != 3 {
+			t.Fatalf("negative probes = %d, want 3", probes)
+		}
 	})
+	t.Run("the bytes arrive after the first probe", func(t *testing.T) {
+		srv := testserver.New(t)
+		srv.UploadExpiresIn = -time.Minute
+		srv.Inject(testserver.RoutePut, testserver.Response{CommitThenClose: true})
+		// Storage has not finished the original PUT when first asked.
+		srv.Inject(testserver.RouteComplete, testserver.Response{Status: 409, Body: `{"code":"upload_not_found","message":"Upload the file first."}`})
+		root := t.TempDir()
+		writeBytes(t, root, "a.jpg", []byte("abc"))
+		var waits recordedSleeps
+		results, _ := run(t, context.Background(), srv, testserver.DefaultKey, root, PlanOptions{}, Runner{Sleep: waits.sleep})
+		if r := results["a.jpg"]; r.Status != StatusUploaded {
+			t.Fatalf("result = %+v", r)
+		}
+		if c := srv.Count(testserver.RouteCreate); c != 1 || len(srv.Assets()) != 1 {
+			t.Fatalf("creates = %d, assets = %d; want 1 and 1 (no duplicate)", c, len(srv.Assets()))
+		}
+		if got := waits.all(); len(got) != 1 || got[0] != settleWait1 {
+			t.Fatalf("waits = %v", got)
+		}
+	})
+}
+
+// recordedSleeps records waits instead of sleeping.
+type recordedSleeps struct {
+	mu sync.Mutex
+	d  []time.Duration
+}
+
+func (r *recordedSleeps) sleep(ctx context.Context, d time.Duration) error {
+	r.mu.Lock()
+	r.d = append(r.d, d)
+	r.mu.Unlock()
+	return ctx.Err()
+}
+
+func (r *recordedSleeps) all() []time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Duration(nil), r.d...)
 }
 
 // TestRunCreateCommittedThenDropped: the server reserved the asset but the
