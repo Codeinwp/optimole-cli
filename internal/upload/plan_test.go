@@ -34,7 +34,7 @@ func byRel(t *testing.T, root string, p *Plan) map[string]planned {
 	t.Helper()
 	out := map[string]planned{}
 	for _, it := range p.Items {
-		rel, err := filepath.Rel(root, it.Path)
+		rel, err := filepath.Rel(root, it.DisplayPath())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -285,6 +285,105 @@ func TestPlanRejectsFilesWhoseIdentityCannotBePinned(t *testing.T) {
 	info, err := os.Lstat(filepath.Join(root, "b.jpg"))
 	if err != nil || !pinIdentity(info) {
 		t.Fatalf("pinIdentity(existing file) = false, %v", err)
+	}
+}
+
+// TestPlanWalksThePhysicalRoot: work/link points to data/leaf, data/album is
+// a real directory and work/album points to secrets. "work/link/.." is data,
+// physically; walking it lexically would list data but descend through
+// work/album into secrets.
+func TestPlanWalksThePhysicalRoot(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "data/leaf/.keep", 1)
+	a := writeFile(t, base, "data/album/a.jpg", 2)
+	b := writeFile(t, base, "data/album/b.jpg", 3)
+	secret := writeFile(t, base, "secrets/secret.jpg", 2)
+	if err := os.MkdirAll(filepath.Join(base, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "data", "leaf"), filepath.Join(base, "work", "link")); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(base, "secrets"), filepath.Join(base, "work", "album")); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	arg := filepath.Join(base, "work", "link") + sep + ".."
+
+	plan, err := BuildPlan(context.Background(), []string{arg}, PlanOptions{Recursive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := plan.Selected()
+	if len(selected) != 2 {
+		t.Fatalf("selected = %+v", selected)
+	}
+	secretInfo, _ := os.Lstat(secret)
+	for i, want := range []string{a, b} {
+		wantInfo, _ := os.Lstat(want)
+		it := selected[i]
+		if !os.SameFile(it.info, wantInfo) || os.SameFile(it.info, secretInfo) {
+			t.Fatalf("item %d (%s) is not %s", i, it.Path, want)
+		}
+		if it.Dest != (Destination{Path: "album"}) {
+			t.Fatalf("item %d dest = %+v", i, it.Dest)
+		}
+		// Shown as typed: the argument, then the path below it.
+		if wantShown := arg + sep + "album" + sep + filepath.Base(want); it.DisplayPath() != wantShown {
+			t.Fatalf("item %d shown as %q, want %q", i, it.DisplayPath(), wantShown)
+		}
+		// Opened through the resolved root, which is free of symlinks.
+		if resolved, _ := filepath.EvalSymlinks(it.Path); resolved != it.Path {
+			t.Fatalf("item %d path %q goes through a symlink", i, it.Path)
+		}
+	}
+}
+
+// TestPlanPlainDirectoryArgumentsUnchanged: "dir", "dir/" and "./dir" show
+// the same paths and map to the same folders as before the physical walk.
+func TestPlanPlainDirectoryArgumentsUnchanged(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "dir/a.jpg", 1)
+	writeFile(t, base, "dir/sub/b.jpg", 1)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(base); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(wd) })
+
+	sep := string(filepath.Separator)
+	abs := filepath.Join(base, "dir")
+	cases := map[string]string{
+		"dir":             "dir",
+		"dir" + sep:       "dir",
+		"." + sep + "dir": "dir",
+		abs:               abs,
+		abs + sep:         abs,
+	}
+	for arg, shownRoot := range cases {
+		plan, err := BuildPlan(context.Background(), []string{arg}, PlanOptions{Recursive: true, Folder: "F"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]Destination{}
+		for _, it := range plan.Selected() {
+			got[it.DisplayPath()] = it.Dest
+		}
+		want := map[string]Destination{
+			filepath.Join(shownRoot, "a.jpg"):        {Path: "F"},
+			filepath.Join(shownRoot, "sub", "b.jpg"): {Path: "F/sub"},
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%q: got %v, want %v", arg, got, want)
+		}
+		for k, v := range want {
+			if got[k] != v {
+				t.Fatalf("%q: got %v, want %v", arg, got, want)
+			}
+		}
 	}
 }
 

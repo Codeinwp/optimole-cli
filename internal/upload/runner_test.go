@@ -52,7 +52,7 @@ func run(t *testing.T, ctx context.Context, srv *testserver.Server, key string, 
 	r.OnResult = func(res Result) {
 		mu.Lock()
 		defer mu.Unlock()
-		rel, _ := filepath.Rel(root, res.Item.Path)
+		rel, _ := filepath.Rel(root, res.Item.DisplayPath())
 		rel = filepath.ToSlash(rel)
 		if _, dup := results[rel]; dup {
 			t.Errorf("%s reported twice", rel)
@@ -728,7 +728,7 @@ func TestRunRefusesFilesReplacedAfterPlanning(t *testing.T) {
 			srv := testserver.New(t)
 			results := map[string]Result{}
 			r := Runner{Client: newClient(t, srv, testserver.DefaultKey), OnResult: func(res Result) {
-				rel, _ := filepath.Rel(root, res.Item.Path)
+				rel, _ := filepath.Rel(root, res.Item.DisplayPath())
 				results[filepath.ToSlash(rel)] = res
 			}}
 			r.Run(context.Background(), plan.Selected())

@@ -801,3 +801,36 @@ func TestOutputWriteErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestUploadDotDotAfterSymlinkStaysPhysical is the reported attack:
+// work/link -> data/leaf, data/album is real, work/album -> secrets.
+// "upload -r --create-folders work/link/.." must upload data/album/* only.
+func TestUploadDotDotAfterSymlinkStaysPhysical(t *testing.T) {
+	base := tree(t, map[string]string{
+		"data/leaf/.keep":    "x",
+		"data/album/a.jpg":   "aa",
+		"data/album/b.jpg":   "bbb",
+		"secrets/secret.jpg": "SECRET",
+	})
+	if err := os.MkdirAll(filepath.Join(base, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "data", "leaf"), filepath.Join(base, "work", "link")); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(base, "secrets"), filepath.Join(base, "work", "album")); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t).withKey()
+	arg := filepath.Join(base, "work", "link") + string(filepath.Separator) + ".."
+	if code := h.run("upload", "-r", "--create-folders", arg); code != ExitOK {
+		t.Fatalf("exit %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	done := h.srv.CompletedByName()
+	if _, leaked := done["secret.jpg"]; leaked || len(done) != 2 || done["a.jpg"].Size != 2 || done["b.jpg"].Size != 3 {
+		t.Fatalf("uploaded = %v", done)
+	}
+	if got := strings.Join(h.srv.FolderPaths(), ","); got != "album" {
+		t.Fatalf("folders = %s", got)
+	}
+}

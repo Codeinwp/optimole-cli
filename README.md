@@ -116,7 +116,9 @@ from the completion answer is printed.
 - Hidden entries (names starting with `.`) inside directories are ignored unless `--include-hidden`; a file
   you name explicitly is always considered.
 - Symbolic links are never followed, including one named on the command line (with or without a trailing
-  `/`); they are reported as skipped.
+  `/`); they are reported as skipped. Symlinks earlier in a path you type are resolved the way the shell
+  resolves them (`link/..` is the parent of the link's target), and the directory found that way is the one
+  that is walked.
 - Each file is checked again right before it is sent: it must still be the same regular file, with the same
   size, that was listed. A file or directory swapped for a symlink (or anything else) in the meantime fails
   instead of uploading whatever the path now points to.

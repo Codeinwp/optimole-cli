@@ -131,9 +131,9 @@ func (r *Reporter) Result(res upload.Result) {
 
 	switch res.Status {
 	case upload.StatusUploaded:
-		fmt.Fprintf(r.w, "uploaded  %s -> %s  %s\n", res.Item.Path, res.Item.Dest, res.URL)
+		fmt.Fprintf(r.w, "uploaded  %s -> %s  %s\n", res.Item.DisplayPath(), res.Item.Dest, res.URL)
 	case upload.StatusSkipped:
-		fmt.Fprintf(r.w, "skipped   %s: %s\n", res.Item.Path, msg)
+		fmt.Fprintf(r.w, "skipped   %s: %s\n", res.Item.DisplayPath(), msg)
 	default:
 		if res.NotAttempted {
 			// Listed only in JSON; the summary gives the count.
@@ -141,10 +141,10 @@ func (r *Reporter) Result(res upload.Result) {
 		}
 		if res.Item.Status == upload.StatusFailed {
 			// Failed while planning (unreadable directory).
-			fmt.Fprintf(r.w, "failed    %s: %s\n", res.Item.Path, msg)
+			fmt.Fprintf(r.w, "failed    %s: %s\n", res.Item.DisplayPath(), msg)
 			return
 		}
-		fmt.Fprintf(r.w, "failed    %s -> %s: %s\n", res.Item.Path, res.Item.Dest, msg)
+		fmt.Fprintf(r.w, "failed    %s -> %s: %s\n", res.Item.DisplayPath(), res.Item.Dest, msg)
 	}
 }
 
@@ -156,11 +156,11 @@ func (r *Reporter) Planned(it upload.Item) {
 		r.enc.Encode(r.line(it, upload.StatusPlanned))
 		return
 	}
-	fmt.Fprintf(r.w, "planned   %s -> %s (%s)\n", it.Path, it.Dest, upload.HumanSize(it.Size))
+	fmt.Fprintf(r.w, "planned   %s -> %s (%s)\n", it.DisplayPath(), it.Dest, upload.HumanSize(it.Size))
 }
 
 func (r *Reporter) line(it upload.Item, status upload.Status) FileLine {
-	l := FileLine{Path: it.Path, Folder: it.Dest.Path, Status: string(status)}
+	l := FileLine{Path: it.DisplayPath(), Folder: it.Dest.Path, Status: string(status)}
 	if it.Dest.ID > 0 {
 		l.Folder = ""
 		l.FolderID = it.Dest.ID

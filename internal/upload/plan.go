@@ -55,8 +55,12 @@ func (d Destination) key() string {
 
 // Item is one file the planner found.
 type Item struct {
-	// Path is the file to open.
+	// Path is the file to open. For files found in a directory it lies
+	// under the directory's physically resolved path.
 	Path string
+	// Display is the path as the user named it: the argument, plus the path
+	// below it for files found in a directory.
+	Display string
 	// Size is the size seen while planning; the runner checks it again.
 	Size int64
 	Dest Destination
@@ -91,6 +95,14 @@ type Plan struct {
 	Items []Item
 	// Ignored counts hidden and excluded entries, which are not listed.
 	Ignored int
+}
+
+// DisplayPath is the path to show: Display, or Path when there is none.
+func (it Item) DisplayPath() string {
+	if it.Display != "" {
+		return it.Display
+	}
+	return it.Path
 }
 
 // Selected returns the files to upload.
@@ -162,6 +174,7 @@ type builder struct {
 
 func (b *builder) addArg(arg string) error {
 	arg = trimArg(arg)
+	display := displayArg(arg)
 	info, err := os.Lstat(arg)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -171,23 +184,79 @@ func (b *builder) addArg(arg string) error {
 	}
 	switch {
 	case info.Mode()&fs.ModeSymlink != 0:
-		b.skip(arg, "symbolic link (not followed)")
+		b.skip(arg, display, "symbolic link (not followed)")
 	case info.IsDir():
 		if !b.opts.Recursive {
 			return usageErrorf("%s is a directory; use -r to upload its contents", arg)
 		}
-		return b.walk(arg)
+		root, err := physicalDir(arg)
+		if err != nil {
+			return usageErrorf("%s: %v", arg, unwrapPathError(err))
+		}
+		return b.walk(display, root)
 	case info.Mode().IsRegular():
 		name := filepath.Base(arg)
 		if b.excluded(name, name) {
 			b.plan.Ignored++
 			return nil
 		}
-		return b.addFile(arg, info, "")
+		return b.addFile(arg, display, info, "")
 	default:
-		b.skip(arg, "not a regular file")
+		b.skip(arg, display, "not a regular file")
 	}
 	return nil
+}
+
+// physicalDir resolves a directory argument the way the kernel does (each
+// symlink in it, then any ".." after it) into an absolute path free of
+// symlinks. The walk needs that: filepath.WalkDir builds child paths with
+// filepath.Join, which cleans them lexically, so walking "link/.." would list
+// one directory (the link target's parent) but descend through another (the
+// argument's own parent). Below a symlink-free root, lexical and physical
+// paths agree, and children are still lstat-checked and never followed.
+func physicalDir(arg string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(arg)
+	if err != nil {
+		return "", err
+	}
+	if filepath.IsAbs(resolved) {
+		return resolved, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	// Getwd may answer with $PWD, which can itself go through symlinks.
+	if wd, err = filepath.EvalSymlinks(wd); err != nil {
+		return "", err
+	}
+	return filepath.Join(wd, resolved), nil
+}
+
+// displayArg is how an argument is shown: as typed, tidied with
+// filepath.Clean only when it has no ".." (where cleaning could change which
+// file it names).
+func displayArg(arg string) string {
+	for _, part := range strings.FieldsFunc(arg, func(r rune) bool { return r == '/' || r == filepath.Separator }) {
+		if part == ".." {
+			return arg
+		}
+	}
+	return filepath.Clean(arg)
+}
+
+// joinDisplay shows a path found below an argument: the argument as shown,
+// then the relative path (in OS form), without cleaning.
+func joinDisplay(display, rel string) string {
+	switch {
+	case rel == "." || rel == "":
+		return display
+	case display == ".":
+		return rel
+	case display == "" || strings.HasSuffix(display, "/") || os.IsPathSeparator(display[len(display)-1]):
+		return display + rel
+	}
+	return display + string(filepath.Separator) + rel
 }
 
 // trimArg removes trailing separators and trailing "." segments ("dir/",
@@ -219,14 +288,21 @@ func trimArg(arg string) string {
 	}
 }
 
-func (b *builder) walk(root string) error {
+// walk plans the contents of a directory. root is its physically resolved
+// path (see physicalDir); display is how the argument is shown.
+func (b *builder) walk(display, root string) error {
 	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if ctxErr := b.ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
+		osRel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return relErr
+		}
+		shown := joinDisplay(display, osRel)
 		if err != nil {
 			// A directory that cannot be read (or an entry that vanished).
-			b.plan.Items = append(b.plan.Items, Item{Path: p, Status: StatusFailed, Reason: "cannot read: " + unwrapPathError(err).Error()})
+			b.plan.Items = append(b.plan.Items, Item{Path: p, Display: shown, Status: StatusFailed, Reason: "cannot read: " + unwrapPathError(err).Error()})
 			if d != nil && d.IsDir() && p != root {
 				return fs.SkipDir
 			}
@@ -235,11 +311,7 @@ func (b *builder) walk(root string) error {
 		if p == root {
 			return nil
 		}
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			return relErr
-		}
-		rel = filepath.ToSlash(rel)
+		rel := filepath.ToSlash(osRel)
 		name := d.Name()
 		if (!b.opts.IncludeHidden && strings.HasPrefix(name, ".")) || b.excluded(rel, name) {
 			b.plan.Ignored++
@@ -250,32 +322,32 @@ func (b *builder) walk(root string) error {
 		}
 		switch {
 		case d.Type()&fs.ModeSymlink != 0:
-			b.skip(p, "symbolic link (not followed)")
+			b.skip(p, shown, "symbolic link (not followed)")
 			return nil
 		case d.IsDir():
 			return nil
 		case !d.Type().IsRegular():
-			b.skip(p, "not a regular file")
+			b.skip(p, shown, "not a regular file")
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
-			b.plan.Items = append(b.plan.Items, Item{Path: p, Status: StatusFailed, Reason: "cannot read: " + unwrapPathError(err).Error()})
+			b.plan.Items = append(b.plan.Items, Item{Path: p, Display: shown, Status: StatusFailed, Reason: "cannot read: " + unwrapPathError(err).Error()})
 			return nil
 		}
 		dir := path.Dir(rel)
 		if dir == "." {
 			dir = ""
 		}
-		return b.addFile(p, info, dir)
+		return b.addFile(p, shown, info, dir)
 	})
 }
 
 // addFile plans one regular file; subdir is its directory relative to the
 // argument root ("" for the root itself).
-func (b *builder) addFile(p string, info fs.FileInfo, subdir string) error {
+func (b *builder) addFile(p, display string, info fs.FileInfo, subdir string) error {
 	size := info.Size()
-	it := Item{Path: p, Size: size, Status: StatusPlanned, info: info}
+	it := Item{Path: p, Display: display, Size: size, Status: StatusPlanned, info: info}
 	if err := CheckFilename(filepath.Base(p)); err != nil {
 		it.Status, it.Reason = StatusSkipped, err.Error()
 	} else if err := CheckSize(size); err != nil {
@@ -369,8 +441,8 @@ func pinIdentity(info fs.FileInfo) bool {
 	return os.SameFile(info, info)
 }
 
-func (b *builder) skip(p, reason string) {
-	b.plan.Items = append(b.plan.Items, Item{Path: p, Status: StatusSkipped, Reason: reason})
+func (b *builder) skip(p, display, reason string) {
+	b.plan.Items = append(b.plan.Items, Item{Path: p, Display: display, Status: StatusSkipped, Reason: reason})
 }
 
 func (b *builder) excluded(rel, name string) bool {
