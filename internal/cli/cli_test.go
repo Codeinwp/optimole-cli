@@ -760,6 +760,38 @@ func TestOutputWriteErrors(t *testing.T) {
 			t.Fatalf("exit %d: %s", code, h.stderr.String())
 		}
 	})
+	t.Run("login", func(t *testing.T) {
+		h := newHarness(t)
+		h.stdin = strings.NewReader(testserver.DefaultKey)
+		env := h.env()
+		env.Stdout = &failingWriter{}
+		if code := Run(context.Background(), []string{"login"}, env); code != ExitFailure || !strings.Contains(h.stderr.String(), "writing output") {
+			t.Fatalf("exit %d: %s", code, h.stderr.String())
+		}
+	})
+	for _, saved := range []bool{true, false} {
+		t.Run(fmt.Sprintf("logout (key saved: %v)", saved), func(t *testing.T) {
+			h := newHarness(t)
+			if saved {
+				if err := config.Save(config.Path(h.cfgDir), config.File{APIKey: testserver.DefaultKey}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env := h.env()
+			env.Stdout = &failingWriter{}
+			if code := Run(context.Background(), []string{"logout"}, env); code != ExitFailure || !strings.Contains(h.stderr.String(), "writing output") {
+				t.Fatalf("exit %d: %s", code, h.stderr.String())
+			}
+		})
+	}
+	t.Run("version", func(t *testing.T) {
+		h := newHarness(t)
+		env := h.env()
+		env.Stdout = &failingWriter{}
+		if code := Run(context.Background(), []string{"version"}, env); code != ExitFailure || !strings.Contains(h.stderr.String(), "writing output") {
+			t.Fatalf("exit %d: %s", code, h.stderr.String())
+		}
+	})
 	for _, args := range [][]string{{"folders"}, {"folders", "--json"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			h, code := runWith(t, &failingWriter{}, args...)

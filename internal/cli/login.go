@@ -13,6 +13,7 @@ import (
 
 	"github.com/Codeinwp/optimole-cli/internal/api"
 	"github.com/Codeinwp/optimole-cli/internal/config"
+	"github.com/Codeinwp/optimole-cli/internal/output"
 	"github.com/Codeinwp/optimole-cli/internal/redact"
 	"github.com/Codeinwp/optimole-cli/internal/termecho"
 )
@@ -112,12 +113,16 @@ func runLogin(ctx context.Context, args []string, env Env) int {
 		fmt.Fprintf(env.Stderr, "optimole login: %s\n", red.Error(err))
 		return ExitFailure
 	}
-	fmt.Fprintf(env.Stdout, "Logged in. The API key was saved to %s\n", path)
+	out := output.NewErrWriter(env.Stdout)
+	fmt.Fprintf(out, "Logged in. The API key was saved to %s\n", path)
 	if note != "" {
-		fmt.Fprintln(env.Stdout, note)
+		fmt.Fprintln(out, note)
 	}
 	if env.Getenv != nil && strings.TrimSpace(env.Getenv(config.EnvAPIKey)) != "" {
 		fmt.Fprintf(env.Stderr, "note: %s is set and takes precedence over the saved key\n", config.EnvAPIKey)
+	}
+	if err := out.Err(); err != nil {
+		return outputFailed(env, err)
 	}
 	return ExitOK
 }
@@ -219,13 +224,17 @@ func runLogout(args []string, env Env) int {
 		fmt.Fprintf(env.Stderr, "optimole logout: %v\n", err)
 		return ExitFailure
 	}
+	out := output.NewErrWriter(env.Stdout)
 	if removed {
-		fmt.Fprintf(env.Stdout, "Logged out. Deleted %s\n", path)
+		fmt.Fprintf(out, "Logged out. Deleted %s\n", path)
 	} else {
-		fmt.Fprintln(env.Stdout, "No saved API key.")
+		fmt.Fprintln(out, "No saved API key.")
 	}
 	if env.Getenv != nil && strings.TrimSpace(env.Getenv(config.EnvAPIKey)) != "" {
 		fmt.Fprintf(env.Stderr, "note: %s is still set in this environment\n", config.EnvAPIKey)
+	}
+	if err := out.Err(); err != nil {
+		return outputFailed(env, err)
 	}
 	return ExitOK
 }
@@ -240,7 +249,9 @@ func runVersion(args []string, env Env) int {
 		return flagExit(err)
 	}
 	b := env.Build
-	fmt.Fprintf(env.Stdout, "optimole %s (commit %s, built %s)\n", orDefault(b.Version, "dev"), orDefault(b.Commit, "unknown"), orDefault(b.Date, "unknown"))
+	if _, err := fmt.Fprintf(env.Stdout, "optimole %s (commit %s, built %s)\n", orDefault(b.Version, "dev"), orDefault(b.Commit, "unknown"), orDefault(b.Date, "unknown")); err != nil {
+		return outputFailed(env, err)
+	}
 	return ExitOK
 }
 
