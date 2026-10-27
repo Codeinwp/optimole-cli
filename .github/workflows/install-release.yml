@@ -21,8 +21,6 @@ jobs:
     env:
       SH_URL: https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.sh
       PS_URL: https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.ps1
-      # A prerelease is never "latest", so the README one-liner would install another release.
-      LATEST: ${{ github.event.release.prerelease != true }}
     steps:
       - name: Release to check
         shell: bash
@@ -31,6 +29,10 @@ jobs:
           if [ -z "$tag" ]; then tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"; fi
           echo "TAG=$tag" >> "$GITHUB_ENV"
           echo "EXPECTED=${tag#v}" >> "$GITHUB_ENV"
+          # The README one-liners install GitHub's "latest" release; check them only when that is this one
+          # (a prerelease, or a release published without being marked latest, is not).
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          echo "LATEST=$([ "$latest" = "$tag" ] && echo true || echo false)" >> "$GITHUB_ENV"
         env:
           GH_TOKEN: ${{ github.token }}
 

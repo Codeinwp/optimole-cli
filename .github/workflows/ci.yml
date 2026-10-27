@@ -135,6 +135,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           if (($userPath -split ';') -notcontains (Split-Path $exe)) { throw 'install folder was not added to the user PATH' }
+      - name: install.ps1 into a folder with brackets, under StrictMode (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          OPTIMOLE_DOWNLOAD_URL: http://127.0.0.1:8765
+          OPTIMOLE_NO_MODIFY_PATH: '1'
+        run: |
+          Set-StrictMode -Version Latest
+          $env:OPTIMOLE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP '[opt] tools'
+          Get-Content -Raw install.ps1 | Invoke-Expression
+          Get-Content -Raw install.ps1 | Invoke-Expression
+          $exe = Join-Path $env:OPTIMOLE_INSTALL_DIR 'optimole.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw 'optimole.exe missing from the bracketed folder' }
+          if (@(Get-ChildItem -LiteralPath $env:OPTIMOLE_INSTALL_DIR -Force).Count -ne 1) { throw 'staging files were left behind' }
+          & $exe version
       - name: install.ps1 again (PowerShell 7, reinstall over the first)
         if: runner.os == 'Windows'
         shell: pwsh

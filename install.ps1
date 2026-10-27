@@ -11,6 +11,8 @@
 #   $env:OPTIMOLE_DOWNLOAD_URL = '...'        where the release files are (for testing a local build)
 
 & {
+    # This block runs in the caller's session: keep its settings to this scope, and restore what it changes.
+    Set-StrictMode -Off
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
 
@@ -27,56 +29,70 @@
     $archive = "optimole_windows_$arch.zip"
     $dir = if ($env:OPTIMOLE_INSTALL_DIR) { $env:OPTIMOLE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\optimole' }
 
-    # Windows PowerShell 5.1 on older .NET may not offer TLS 1.2. Add it only when the session pins explicit
-    # protocols (0 is SystemDefault, which already negotiates the best one), and restore the setting after,
-    # since this script runs inside the caller's session.
     $protocols = [Net.ServicePointManager]::SecurityProtocol
-    if ([int]$protocols -ne 0 -and -not ($protocols -band [Net.SecurityProtocolType]::Tls12)) {
-        [Net.ServicePointManager]::SecurityProtocol = $protocols -bor [Net.SecurityProtocolType]::Tls12
-    }
-
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('optimole-' + [guid]::NewGuid())
-    New-Item -ItemType Directory -Path $tmp | Out-Null
+    $tmp = $null
     try {
+        # Windows PowerShell 5.1 on older .NET may not offer TLS 1.2. Add it only when the session pins explicit
+        # protocols (0 is SystemDefault, which already negotiates the best one); restored in finally.
+        if ([int]$protocols -ne 0 -and -not ($protocols -band [Net.SecurityProtocolType]::Tls12)) {
+            [Net.ServicePointManager]::SecurityProtocol = $protocols -bor [Net.SecurityProtocolType]::Tls12
+        }
+
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ('optimole-' + [guid]::NewGuid())
+        [IO.Directory]::CreateDirectory($tmp) | Out-Null
+
         if ($env:OPTIMOLE_DOWNLOAD_URL) {
             $base = $env:OPTIMOLE_DOWNLOAD_URL.TrimEnd('/')
         } else {
             if ($version -eq 'latest') {
                 # Pin the newest release once, so the archive and checksums.txt come from the same one.
-                $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://github.com/$repo/releases/latest"
-                $final = if ($response.BaseResponse.ResponseUri) { $response.BaseResponse.ResponseUri } else { $response.BaseResponse.RequestMessage.RequestUri }
+                $response = (Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://github.com/$repo/releases/latest").BaseResponse
+                # Windows PowerShell answers an HttpWebResponse (ResponseUri), PowerShell 7 an HttpResponseMessage.
+                $final = if ($response.PSObject.Properties['ResponseUri']) { $response.ResponseUri } else { $response.RequestMessage.RequestUri }
                 if ("$final" -notmatch '/releases/tag/([^/?#]+)') { throw "optimole install: could not find the latest release of $repo" }
                 $version = $Matches[1]
             }
             $base = "https://github.com/$repo/releases/download/$version"
         }
+
+        $archivePath = Join-Path $tmp $archive
+        $checksumsPath = Join-Path $tmp 'checksums.txt'
         Write-Host "Downloading $archive ($version)..."
-        Invoke-WebRequest -UseBasicParsing -Uri "$base/$archive" -OutFile (Join-Path $tmp $archive)
-        Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile (Join-Path $tmp 'checksums.txt')
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/$archive" -OutFile $archivePath
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $checksumsPath
 
         $expected = $null
-        foreach ($line in Get-Content (Join-Path $tmp 'checksums.txt')) {
+        foreach ($line in [IO.File]::ReadAllLines($checksumsPath)) {
             $fields = $line.Trim() -split '\s+'
             if ($fields.Count -eq 2 -and $fields[1] -eq $archive) { $expected = $fields[0].ToLowerInvariant() }
         }
         if (-not $expected) { throw "optimole install: checksums.txt lists no $archive" }
-        $actual = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $tmp $archive)).Hash.ToLowerInvariant()
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
         if ($actual -ne $expected) { throw "optimole install: checksum mismatch for $archive; nothing was installed" }
 
-        Expand-Archive -Path (Join-Path $tmp $archive) -DestinationPath (Join-Path $tmp 'x') -Force
-        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $unpacked = Join-Path $tmp 'x'
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $unpacked -Force
+        [IO.Directory]::CreateDirectory($dir) | Out-Null
         $exe = Join-Path $dir 'optimole.exe'
-        # Copy next to the target under a unique name, then swap it in, so an interrupted copy never leaves a
-        # broken optimole.exe behind.
+
+        # Copy next to the target under a unique name, then swap it in with one file-system call, so an
+        # interrupted install never leaves optimole.exe missing or half-written. .NET calls take paths
+        # literally (no wildcards in folder names such as "[tools]").
         $staged = Join-Path $dir ('.optimole-' + [guid]::NewGuid() + '.exe')
-        Copy-Item -Path (Join-Path $tmp 'x\optimole.exe') -Destination $staged
         try {
-            Move-Item -Path $staged -Destination $exe -Force
+            [IO.File]::Copy((Join-Path $unpacked 'optimole.exe'), $staged)
+            if ([IO.File]::Exists($exe)) {
+                [IO.File]::Replace($staged, $exe, [NullString]::Value)
+            } else {
+                [IO.File]::Move($staged, $exe)
+            }
         } finally {
-            Remove-Item -Force -Path $staged -ErrorAction SilentlyContinue
+            if ([IO.File]::Exists($staged)) { [IO.File]::Delete($staged) }
         }
 
-        Write-Host ("Installed " + (& $exe version))
+        $installed = & $exe version
+        if ($LASTEXITCODE -ne 0) { throw "optimole install: installed $exe, but it does not run" }
+        Write-Host "Installed $installed"
         Write-Host "         to $exe"
 
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -92,7 +108,7 @@
         }
         Write-Host "`nNext: optimole login   (paste an API key from the Optimole dashboard)"
     } finally {
-        Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
+        if ($tmp -and [IO.Directory]::Exists($tmp)) { [IO.Directory]::Delete($tmp, $true) }
         [Net.ServicePointManager]::SecurityProtocol = $protocols
     }
 }
