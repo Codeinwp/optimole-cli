@@ -284,3 +284,13 @@ go build -o optimole ./cmd/optimole
 Standard library only. The tests run against an in-process fake of the API and of the storage endpoint
 (`internal/testserver`); they never contact a real service. Releases are built by GoReleaser when a `v*` tag
 is pushed (as a draft release to review and publish).
+
+## License
+
+Copyright (C) 2026 Vertigo Studio SA.
+
+`optimole` is free software: you can redistribute it and/or modify it under the terms of the GNU General
+Public License as published by the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+see the [LICENSE](LICENSE) file for details.
+
