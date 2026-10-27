@@ -8,26 +8,46 @@ optimole login                                   # paste your API key once
 optimole upload -r ./photos --folder Campaigns   # photos/2024/a.jpg -> Campaigns/2024
 ```
 
-> **Server requirement:** the CLI uses the dashboard's unified upload API (`POST /api/assets` →
-> presigned `PUT` → `POST /api/assets/{key}/completion`). It works against production once that API is
-> released on dashboard.optimole.com; until then, point it at an environment that has it with `--api-url`.
-
 ## Install
 
-With Go 1.23 or newer:
+**macOS and Linux**
 
 ```sh
-go install github.com/Codeinwp/optimole-cli/cmd/optimole@latest
+curl -fsSL https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.sh | sh
 ```
 
-Prebuilt binaries for macOS, Linux and Windows (amd64 and arm64) will be attached to each
-[GitHub release](https://github.com/Codeinwp/optimole-cli/releases) once releases are published, with a
-`checksums.txt` to verify them:
+**Windows** (PowerShell)
 
-```sh
-shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf optimole_*_darwin_arm64.tar.gz && sudo mv optimole /usr/local/bin/
+```powershell
+irm https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.ps1 | iex
 ```
+
+Then run `optimole login` and paste an API key from the Optimole dashboard.
+
+The installer downloads the latest [release](https://github.com/Codeinwp/optimole-cli/releases) for your
+system and CPU, checks it against the release's `checksums.txt`, and needs no administrator rights:
+
+| System | Installs to | PATH |
+|---|---|---|
+| macOS, Linux | `/usr/local/bin` when it is writable, else `~/.local/bin` | Adds `~/.local/bin` to your shell profile (`.zshrc`, `.bashrc`/`.bash_profile`, fish config or `.profile`) when it is missing |
+| Windows | `%LOCALAPPDATA%\Programs\optimole` | Adds the folder to your user PATH |
+
+Run the same command again to update. Optional settings (environment variables): `OPTIMOLE_VERSION=v0.1.0`
+for a specific release, `OPTIMOLE_INSTALL_DIR` for another folder, and `OPTIMOLE_NO_MODIFY_PATH=1` to leave
+PATH and shell profiles alone. To uninstall, delete the `optimole` binary (and `optimole logout` first to
+remove the saved key).
+
+**Other ways**
+
+- Download the archive for your system from the [releases page](https://github.com/Codeinwp/optimole-cli/releases),
+  check it, and put `optimole` on your PATH:
+
+  ```sh
+  shasum -a 256 -c checksums.txt --ignore-missing
+  tar -xzf optimole_darwin_arm64.tar.gz && mv optimole ~/.local/bin/
+  ```
+
+- With Go 1.23 or newer: `go install github.com/Codeinwp/optimole-cli/cmd/optimole@latest`
 
 ## Authentication
 
@@ -50,7 +70,7 @@ granted (and their subfolders): always pass `--folder` (or `--folder-id`). They 
 (`folder_creation_forbidden`), upload into the library root (`folder_required`), or list folders.
 
 The API base URL defaults to `https://dashboard.optimole.com/api`; override it with `--api-url` or
-`OPTIMOLE_API_URL` (for example `https://staging-dashboard.optimole.com/api`). Only `https` URLs are
+`OPTIMOLE_API_URL` (for example to try another environment). Only `https` URLs are
 accepted, except `http://localhost` and `http://127.0.0.1`. TLS certificates are always verified.
 
 ## Commands

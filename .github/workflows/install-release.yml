@@ -1,0 +1,50 @@
+name: Install check
+
+# Runs the one-command installs from the README against the published release, on every platform.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: install (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Expected version
+        shell: bash
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          if [ -z "$tag" ]; then tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"; fi
+          echo "EXPECTED=${tag#v}" >> "$GITHUB_ENV"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: curl | sh
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.sh | sh
+          for dir in /usr/local/bin "$HOME/.local/bin"; do
+            if [ -x "$dir/optimole" ]; then
+              out="$("$dir/optimole" version)"; echo "$out"
+              case "$out" in *"$EXPECTED"*) exit 0 ;; esac
+              echo "expected version $EXPECTED" >&2; exit 1
+            fi
+          done
+          echo "optimole was not installed" >&2
+          exit 1
+      - name: irm | iex
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          irm https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.ps1 | iex
+          $out = & (Join-Path $env:LOCALAPPDATA 'Programs\optimole\optimole.exe') version
+          Write-Host $out
+          if ($out -notlike "*$env:EXPECTED*") { throw "expected version $env:EXPECTED" }

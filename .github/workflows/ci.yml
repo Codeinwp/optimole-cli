@@ -58,3 +58,91 @@ jobs:
           distribution: goreleaser
           version: "~> v2"
           args: check
+
+  # Builds the release files exactly as a tag would (no publish), then runs the install scripts against them
+  # on every platform, so a broken installer is caught before a release, not by a user.
+  release-snapshot:
+    name: build release files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: shellcheck install.sh
+        run: shellcheck install.sh
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+
+  install:
+    name: install (${{ matrix.os }})
+    needs: release-snapshot
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: release-files
+      - name: Serve the release files locally
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd release-files
+          nohup python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &
+          sleep 2
+      - name: Serve the release files locally (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Start-Process -FilePath python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1' -WorkingDirectory release-files -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+      - name: install.sh (piped into sh, as the README shows)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPTIMOLE_DOWNLOAD_URL: http://127.0.0.1:8765
+        run: |
+          cat install.sh | sh
+          for dir in /usr/local/bin "$HOME/.local/bin"; do
+            if [ -x "$dir/optimole" ]; then "$dir/optimole" version; exit 0; fi
+          done
+          echo "optimole was not installed" >&2
+          exit 1
+      - name: install.ps1 (Windows PowerShell 5.1, piped into iex)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          OPTIMOLE_DOWNLOAD_URL: http://127.0.0.1:8765
+        run: |
+          Get-Content -Raw install.ps1 | Invoke-Expression
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\optimole\optimole.exe'
+          & $exe version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if (($userPath -split ';') -notcontains (Split-Path $exe)) { throw 'install folder was not added to the user PATH' }
+      - name: install.ps1 again (PowerShell 7, reinstall over the first)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          OPTIMOLE_DOWNLOAD_URL: http://127.0.0.1:8765
+        run: |
+          Get-Content -Raw install.ps1 | Invoke-Expression
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\optimole'
+          if ((($userPath -split ';') | Where-Object { $_ -eq $dir }).Count -ne 1) { throw 'the install folder must appear once in PATH' }
+
