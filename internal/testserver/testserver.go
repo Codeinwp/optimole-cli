@@ -292,6 +292,15 @@ func (s *Server) begin(route Route, r *http.Request) (Event, *Response) {
 	return ev, nil
 }
 
+// finishThenDrop files the event, then drops the connection if asked: in that
+// order, a client that sees the drop always finds the request counted.
+func (s *Server) finishThenDrop(ev Event, status int, drop func()) {
+	s.finish(ev, status)
+	if drop != nil {
+		drop()
+	}
+}
+
 func (s *Server) finish(ev Event, status int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -307,15 +316,9 @@ func (s *Server) violate(format string, args ...any) {
 	s.violations = append(s.violations, fmt.Sprintf(format, args...))
 }
 
-func writeInjected(w http.ResponseWriter, resp *Response) int {
+func writeInjected(w http.ResponseWriter, resp *Response) (int, func()) {
 	if resp.CloseConn {
-		if hj, ok := w.(http.Hijacker); ok {
-			if conn, _, err := hj.Hijack(); err == nil {
-				conn.Close()
-				return 0
-			}
-		}
-		panic(http.ErrAbortHandler)
+		return 0, func() { dropConn(w) }
 	}
 	for k, v := range resp.Header {
 		w.Header().Set(k, v)
@@ -325,21 +328,24 @@ func writeInjected(w http.ResponseWriter, resp *Response) int {
 	}
 	w.WriteHeader(resp.Status)
 	io.WriteString(w, resp.Body)
-	return resp.Status
+	return resp.Status, nil
+}
+
+// dropConn closes the client's connection without an answer.
+func dropConn(w http.ResponseWriter) {
+	if hj, ok := w.(http.Hijacker); ok {
+		if conn, _, err := hj.Hijack(); err == nil {
+			conn.Close()
+			return
+		}
+	}
+	panic(http.ErrAbortHandler)
 }
 
 // commitThenClose swaps w for a recorder; the returned func drops the real
 // connection instead of sending the recorded answer.
 func commitThenClose(w http.ResponseWriter) (http.ResponseWriter, func()) {
-	return httptest.NewRecorder(), func() {
-		if hj, ok := w.(http.Hijacker); ok {
-			if conn, _, err := hj.Hijack(); err == nil {
-				conn.Close()
-				return
-			}
-		}
-		panic(http.ErrAbortHandler)
-	}
+	return httptest.NewRecorder(), func() { dropConn(w) }
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) int {
@@ -381,11 +387,10 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (Key, bool
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ev, injected := s.begin(RouteCreate, r)
 	status := 0
-	defer func() { s.finish(ev, status) }()
+	var drop func()
+	defer func() { s.finishThenDrop(ev, status, drop) }()
 	if injected != nil && injected.CommitThenClose {
-		var drop func()
 		w, drop = commitThenClose(w)
-		defer drop()
 		injected = nil
 	}
 
@@ -410,7 +415,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ev.CreateFolders = body.CreateFolders != nil && *body.CreateFolders
 
 	if injected != nil {
-		status = writeInjected(w, injected)
+		status, drop = writeInjected(w, injected)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -545,11 +550,10 @@ var completionPath = regexp.MustCompile(`^/api/assets/([0-9a-fA-F]{32})/completi
 func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	ev, injected := s.begin(RouteComplete, r)
 	status := 0
-	defer func() { s.finish(ev, status) }()
+	var drop func()
+	defer func() { s.finishThenDrop(ev, status, drop) }()
 	if injected != nil && injected.CommitThenClose {
-		var drop func()
 		w, drop = commitThenClose(w)
-		defer drop()
 		injected = nil
 	}
 	m := completionPath.FindStringSubmatch(r.URL.Path)
@@ -557,7 +561,7 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 		ev.Key = m[1]
 	}
 	if injected != nil {
-		status = writeInjected(w, injected)
+		status, drop = writeInjected(w, injected)
 		return
 	}
 	if m == nil || r.Method != http.MethodPost {
@@ -638,11 +642,10 @@ func (s *Server) assetJSONLocked(a *Asset) map[string]any {
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	ev, injected := s.begin(RoutePut, r)
 	status := 0
-	defer func() { s.finish(ev, status) }()
+	var drop func()
+	defer func() { s.finishThenDrop(ev, status, drop) }()
 	if injected != nil && injected.CommitThenClose {
-		var drop func()
 		w, drop = commitThenClose(w)
-		defer drop()
 		injected = nil
 	}
 
@@ -665,7 +668,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	if injected != nil {
 		io.Copy(io.Discard, r.Body)
-		status = writeInjected(w, injected)
+		status, drop = writeInjected(w, injected)
 		return
 	}
 	s3Error := func(code, msg string) {
@@ -728,9 +731,10 @@ func headersMatch(got http.Header, want map[string]string) bool {
 func (s *Server) handleFolders(w http.ResponseWriter, r *http.Request) {
 	ev, injected := s.begin(RouteFolders, r)
 	status := 0
-	defer func() { s.finish(ev, status) }()
+	var drop func()
+	defer func() { s.finishThenDrop(ev, status, drop) }()
 	if injected != nil {
-		status = writeInjected(w, injected)
+		status, drop = writeInjected(w, injected)
 		return
 	}
 	if r.Method != http.MethodGet {
