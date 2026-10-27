@@ -268,6 +268,80 @@ func TestPlanRefusedHardLinkDoesNotHideAcceptedOne(t *testing.T) {
 	}
 }
 
+// TestPlanHardLinksPlannedOnce: two names for one file are one upload, on
+// every platform (Windows groups them by the file ID read from the path).
+func TestPlanHardLinksPlannedOnce(t *testing.T) {
+	root := t.TempDir()
+	a := writeFile(t, root, "a.jpg", 4)
+	if err := os.Link(a, filepath.Join(root, "b.jpg")); err != nil {
+		t.Skipf("cannot create hard links here: %v", err)
+	}
+	plan, err := BuildPlan(context.Background(), []string{root}, PlanOptions{Recursive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(plan.Selected()); n != 1 {
+		t.Fatalf("%d files planned, want 1: %+v", n, plan.Items)
+	}
+}
+
+// TestPlanSkipsNTFSDataStreams: "photo.jpg:preview.jpg" names a stream of
+// photo.jpg, which shares its file ID; it is skipped, not taken for photo.jpg.
+func TestPlanSkipsNTFSDataStreams(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("NTFS data streams exist only on Windows")
+	}
+	root := t.TempDir()
+	photo := writeFile(t, root, "photo.jpg", 3)
+	stream := photo + ":preview.jpg"
+	if err := os.WriteFile(stream, []byte("preview"), 0o644); err != nil {
+		t.Skipf("cannot create a data stream here: %v", err)
+	}
+	plan, err := BuildPlan(context.Background(), []string{photo, stream}, PlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Items) != 2 || plan.Items[0].Status != StatusPlanned ||
+		plan.Items[1].Status != StatusSkipped || !strings.Contains(plan.Items[1].Reason, "data stream") {
+		t.Fatalf("plan = %+v", plan.Items)
+	}
+}
+
+// TestDuplicateKey: where the info has no file ID (Windows) the key is the ID
+// read from the path, the same for every alias, and reading it fails once
+// the file is gone; elsewhere no key is needed.
+func TestDuplicateKey(t *testing.T) {
+	root := t.TempDir()
+	p := writeFile(t, root, "a.jpg", 1)
+	info, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := duplicateKey(p, info)
+	if runtime.GOOS != "windows" {
+		if key != nil || err != nil {
+			t.Fatalf("duplicateKey = %v, %v; want nil, nil", key, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := key.([3]uint32); !ok {
+		t.Fatalf("key = %#v, want a file ID", key)
+	}
+	upper := filepath.Join(filepath.Dir(p), "A.JPG")
+	if alias, err := duplicateKey(upper, info); err != nil || alias != key {
+		t.Fatalf("alias key = %v, %v; want %v", alias, err, key)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := duplicateKey(p, info); err == nil {
+		t.Fatal("duplicateKey of a removed file succeeded")
+	}
+}
+
 // TestPlanRejectsFilesWhoseIdentityCannotBePinned: on Windows the file ID is
 // read by path while planning; if that fails (the file vanished), the upload
 // check would have nothing to compare with, so the file must not be planned.

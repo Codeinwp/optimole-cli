@@ -184,6 +184,8 @@ func (b *builder) addArg(arg string) error {
 		return usageErrorf("%s: %v", arg, unwrapPathError(err))
 	}
 	switch {
+	case isDataStream(arg):
+		b.skip(arg, display, "NTFS data stream (not uploaded)")
 	case info.Mode()&fs.ModeSymlink != 0:
 		b.skip(arg, display, "symbolic link (not followed)")
 	case info.IsDir():
@@ -259,6 +261,14 @@ func isExtendedPath(p string) bool {
 		return false
 	}
 	return isSep(p[1]) && p[2] == '?' || p[1] == '?' && p[2] == '?'
+}
+
+// isDataStream reports a Windows path naming an NTFS alternate data stream
+// ("photo.jpg:preview"). A stream shares its file's ID, so it would pass as
+// that file; directory listings never return one, so only an argument can
+// name it.
+func isDataStream(p string) bool {
+	return runtime.GOOS == "windows" && strings.ContainsRune(filepath.Base(p), ':')
 }
 
 // displayArg is how an argument is shown: as typed, tidied with
@@ -404,10 +414,15 @@ func (b *builder) addFile(p, display string, info fs.FileInfo, subdir string) er
 		}
 		it.Dest = Destination{Path: folder}
 	}
-	if it.Status == StatusPlanned && !b.pin(info) {
+	key, keyErr := duplicateKey(p, info)
+	if it.Status == StatusPlanned && (!b.pin(info) || keyErr != nil) {
 		// Without a pinned identity the upload-time check could accept a
-		// same-size replacement, so the file is not uploaded.
+		// same-size replacement, and without a key it could be planned
+		// twice, so the file is not uploaded.
 		it.Status, it.Reason = StatusFailed, "cannot read: the file changed while it was being listed"
+	}
+	if keyErr != nil {
+		key = strings.ToLower(p)
 	}
 	// Identities are recorded only now, once the checks have decided which
 	// set the file belongs to.
@@ -415,7 +430,7 @@ func (b *builder) addFile(p, display string, info fs.FileInfo, subdir string) er
 	if it.Status == StatusPlanned {
 		set = b.planned
 	}
-	if set.seen(p, info) {
+	if set.seen(key, info) {
 		return nil
 	}
 	b.plan.Items = append(b.plan.Items, it)
@@ -437,25 +452,15 @@ func newIdentitySet() *identitySet {
 // another: the same path twice, a case alias on a case-insensitive file
 // system, a path through a symlinked parent, or a hard link. Otherwise it
 // adds the file. Distinct files whose names differ only in case stay
-// distinct on case-sensitive file systems.
-func (s *identitySet) seen(p string, info fs.FileInfo) bool {
+// distinct on case-sensitive file systems. key groups files whose info has
+// no ID (see duplicateKey); os.SameFile decides within a group.
+func (s *identitySet) seen(key any, info fs.FileInfo) bool {
 	if id, ok := fileIdentity(info); ok {
 		if s.ids[id] {
 			return true
 		}
 		s.ids[id] = true
 		return false
-	}
-	// Without an ID in the info (Windows), files are grouped by the ID read
-	// from the path, else by the path itself, and os.SameFile decides within
-	// a group.
-	key, ok := pathIdentity(p)
-	if !ok {
-		name := p
-		if abs, err := filepath.Abs(p); err == nil {
-			name = abs
-		}
-		key = strings.ToLower(name)
 	}
 	for _, prev := range s.byKey[key] {
 		if os.SameFile(prev, info) {
@@ -464,6 +469,28 @@ func (s *identitySet) seen(p string, info fs.FileInfo) bool {
 	}
 	s.byKey[key] = append(s.byKey[key], info)
 	return false
+}
+
+// errNoPathIdentity: this platform cannot read a file ID from a path.
+var errNoPathIdentity = errors.New("no file ID from paths here")
+
+// duplicateKey groups a file whose info carries no ID (Windows) with its
+// aliases: by the file ID read from the path, or by the lowercased absolute
+// path where no ID can be read. It is nil when the info has an ID. An error
+// means the file could not be opened by its path just after it was listed.
+func duplicateKey(p string, info fs.FileInfo) (any, error) {
+	if _, ok := fileIdentity(info); ok {
+		return nil, nil
+	}
+	id, err := pathIdentity(p)
+	if !errors.Is(err, errNoPathIdentity) {
+		return id, err
+	}
+	name := p
+	if abs, err := filepath.Abs(p); err == nil {
+		name = abs
+	}
+	return strings.ToLower(name), nil
 }
 
 // pinIdentity makes a FileInfo remember which file it describes and reports

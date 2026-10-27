@@ -6,22 +6,22 @@ import "syscall"
 // p, without following a final symlink: the same ID os.SameFile compares on
 // Windows. It groups the aliases a path cannot show (8.3 short names, case,
 // hard links, linked parents); os.SameFile still decides.
-func pathIdentity(p string) (any, bool) {
+func pathIdentity(p string) (any, error) {
 	name, err := syscall.UTF16PtrFromString(p)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	h, err := syscall.CreateFile(name, 0,
 		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
 		nil, syscall.OPEN_EXISTING,
 		syscall.FILE_FLAG_BACKUP_SEMANTICS|syscall.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	defer syscall.CloseHandle(h)
 	var d syscall.ByHandleFileInformation
 	if err := syscall.GetFileInformationByHandle(h, &d); err != nil {
-		return nil, false
+		return nil, err
 	}
-	return [3]uint32{d.VolumeSerialNumber, d.FileIndexHigh, d.FileIndexLow}, true
+	return [3]uint32{d.VolumeSerialNumber, d.FileIndexHigh, d.FileIndexLow}, nil
 }
