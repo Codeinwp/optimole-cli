@@ -425,12 +425,12 @@ func (b *builder) addFile(p, display string, info fs.FileInfo, subdir string) er
 // identitySet remembers files by identity: device and inode where
 // available, otherwise os.SameFile among case-folded absolute paths.
 type identitySet struct {
-	ids    map[any]bool
-	byPath map[string][]fs.FileInfo
+	ids   map[any]bool
+	byKey map[any][]fs.FileInfo
 }
 
 func newIdentitySet() *identitySet {
-	return &identitySet{ids: map[any]bool{}, byPath: map[string][]fs.FileInfo{}}
+	return &identitySet{ids: map[any]bool{}, byKey: map[any][]fs.FileInfo{}}
 }
 
 // seen reports whether the file is already in the set, under this name or
@@ -446,17 +446,23 @@ func (s *identitySet) seen(p string, info fs.FileInfo) bool {
 		s.ids[id] = true
 		return false
 	}
-	key := p
-	if abs, err := filepath.Abs(p); err == nil {
-		key = abs
+	// Without an ID in the info (Windows), files are grouped by the ID read
+	// from the path, else by the path itself, and os.SameFile decides within
+	// a group.
+	key, ok := pathIdentity(p)
+	if !ok {
+		name := p
+		if abs, err := filepath.Abs(p); err == nil {
+			name = abs
+		}
+		key = strings.ToLower(name)
 	}
-	key = strings.ToLower(key)
-	for _, prev := range s.byPath[key] {
+	for _, prev := range s.byKey[key] {
 		if os.SameFile(prev, info) {
 			return true
 		}
 	}
-	s.byPath[key] = append(s.byPath[key], info)
+	s.byKey[key] = append(s.byKey[key], info)
 	return false
 }
 
