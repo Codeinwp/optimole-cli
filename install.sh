@@ -36,15 +36,6 @@ if [ "$os" = darwin ] && [ "$arch" = amd64 ] && [ "$(sysctl -n sysctl.proc_trans
 	arch=arm64
 fi
 
-if [ -n "${OPTIMOLE_DOWNLOAD_URL:-}" ]; then
-	base="${OPTIMOLE_DOWNLOAD_URL%/}"
-elif [ "$version" = latest ]; then
-	base="https://github.com/$repo/releases/latest/download"
-else
-	base="https://github.com/$repo/releases/download/$version"
-fi
-archive="optimole_${os}_${arch}.tar.gz"
-
 if command -v curl >/dev/null 2>&1; then
 	download() {
 		case "$1" in
@@ -52,11 +43,27 @@ if command -v curl >/dev/null 2>&1; then
 		*) curl -fsSL -o "$2" "$1" ;;
 		esac
 	}
+	# Prints the URL a link finally redirects to.
+	resolve() { curl -fsSLI --proto '=https' --tlsv1.2 -o /dev/null -w '%{url_effective}' "$1"; }
 elif command -v wget >/dev/null 2>&1; then
 	download() { wget -q -O "$2" "$1"; }
+	resolve() { wget -q -S --spider "$1" 2>&1 | awk 'tolower($1) == "location:" { url = $2 } END { print url }'; }
 else
 	fail "needs curl or wget"
 fi
+
+if [ -n "${OPTIMOLE_DOWNLOAD_URL:-}" ]; then
+	base="${OPTIMOLE_DOWNLOAD_URL%/}"
+else
+	if [ "$version" = latest ]; then
+		# Pin the newest release once, so the archive and checksums.txt come from the same one.
+		tag="$(resolve "https://github.com/$repo/releases/latest" 2>/dev/null | sed -n 's#.*/releases/tag/##p' | tr -d '\r')"
+		[ -n "$tag" ] || fail "could not find the latest release of $repo"
+		version="$tag"
+	fi
+	base="https://github.com/$repo/releases/download/$version"
+fi
+archive="optimole_${os}_${arch}.tar.gz"
 
 if command -v sha256sum >/dev/null 2>&1; then
 	sha256() { sha256sum "$1" | cut -d ' ' -f 1; }
@@ -87,25 +94,43 @@ else
 	dir="$HOME/.local/bin"
 fi
 mkdir -p "$dir" || fail "could not create $dir"
-if ! { cp "$tmp/optimole" "$dir/optimole.tmp" && chmod 0755 "$dir/optimole.tmp" && mv -f "$dir/optimole.tmp" "$dir/optimole"; }; then
-	rm -f "$dir/optimole.tmp"
+# A fresh file next to the target (never a shared name, never a symlink), renamed over it in one step.
+staged="$(mktemp "$dir/.optimole.XXXXXX" 2>/dev/null)" || fail "could not write to $dir; set OPTIMOLE_INSTALL_DIR to a writable directory"
+if ! { cat "$tmp/optimole" >"$staged" && chmod 0755 "$staged" && mv -f "$staged" "$dir/optimole"; }; then
+	rm -f "$staged"
 	fail "could not write to $dir; set OPTIMOLE_INSTALL_DIR to a writable directory"
 fi
 
-printf 'Installed %s\n' "$("$dir/optimole" version)"
+installed="$("$dir/optimole" version)" || fail "installed $dir/optimole, but it does not run there (a noexec mount?); set OPTIMOLE_INSTALL_DIR"
+printf 'Installed %s\n' "$installed"
 printf '         to %s/optimole\n' "$dir"
 
 # Make `optimole` work in new terminals when the directory is not on PATH yet.
 case ":$PATH:" in
 *":$dir:"*) ;;
 *)
-	line="export PATH=\"$dir:\$PATH\""
+	# The directory as a single-quoted literal, so nothing in its name is expanded when the profile loads.
+	quoted="'$(printf '%s' "$dir" | sed "s/'/'\\\\''/g")'"
+	line="export PATH=$quoted:\"\$PATH\""
 	case "$(basename "${SHELL:-sh}")" in
 	zsh) profile="$HOME/.zshrc" ;;
-	bash) if [ "$os" = darwin ]; then profile="$HOME/.bash_profile"; else profile="$HOME/.bashrc"; fi ;;
+	bash)
+		if [ "$os" = darwin ]; then
+			# A login bash reads only the first of these it finds; creating .bash_profile would hide .profile.
+			profile="$HOME/.bash_profile"
+			for candidate in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+				if [ -f "$candidate" ]; then
+					profile="$candidate"
+					break
+				fi
+			done
+		else
+			profile="$HOME/.bashrc"
+		fi
+		;;
 	fish)
 		profile="$HOME/.config/fish/config.fish"
-		line="fish_add_path \"$dir\""
+		line="fish_add_path '$(printf '%s' "$dir" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")'"
 		;;
 	*) profile="$HOME/.profile" ;;
 	esac

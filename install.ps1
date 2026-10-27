@@ -16,13 +16,6 @@
 
     $repo = 'Codeinwp/optimole-cli'
     $version = if ($env:OPTIMOLE_VERSION) { $env:OPTIMOLE_VERSION } else { 'latest' }
-    if ($env:OPTIMOLE_DOWNLOAD_URL) {
-        $base = $env:OPTIMOLE_DOWNLOAD_URL.TrimEnd('/')
-    } elseif ($version -eq 'latest') {
-        $base = "https://github.com/$repo/releases/latest/download"
-    } else {
-        $base = "https://github.com/$repo/releases/download/$version"
-    }
 
     # 32-bit PowerShell on 64-bit Windows reports x86; PROCESSOR_ARCHITEW6432 holds the real CPU.
     $cpu = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
@@ -34,12 +27,29 @@
     $archive = "optimole_windows_$arch.zip"
     $dir = if ($env:OPTIMOLE_INSTALL_DIR) { $env:OPTIMOLE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\optimole' }
 
-    # Windows PowerShell 5.1 may not offer TLS 1.2 by default.
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    # Windows PowerShell 5.1 on older .NET may not offer TLS 1.2. Add it only when the session pins explicit
+    # protocols (0 is SystemDefault, which already negotiates the best one), and restore the setting after,
+    # since this script runs inside the caller's session.
+    $protocols = [Net.ServicePointManager]::SecurityProtocol
+    if ([int]$protocols -ne 0 -and -not ($protocols -band [Net.SecurityProtocolType]::Tls12)) {
+        [Net.ServicePointManager]::SecurityProtocol = $protocols -bor [Net.SecurityProtocolType]::Tls12
+    }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('optimole-' + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
+        if ($env:OPTIMOLE_DOWNLOAD_URL) {
+            $base = $env:OPTIMOLE_DOWNLOAD_URL.TrimEnd('/')
+        } else {
+            if ($version -eq 'latest') {
+                # Pin the newest release once, so the archive and checksums.txt come from the same one.
+                $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://github.com/$repo/releases/latest"
+                $final = if ($response.BaseResponse.ResponseUri) { $response.BaseResponse.ResponseUri } else { $response.BaseResponse.RequestMessage.RequestUri }
+                if ("$final" -notmatch '/releases/tag/([^/?#]+)') { throw "optimole install: could not find the latest release of $repo" }
+                $version = $Matches[1]
+            }
+            $base = "https://github.com/$repo/releases/download/$version"
+        }
         Write-Host "Downloading $archive ($version)..."
         Invoke-WebRequest -UseBasicParsing -Uri "$base/$archive" -OutFile (Join-Path $tmp $archive)
         Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile (Join-Path $tmp 'checksums.txt')
@@ -56,7 +66,15 @@
         Expand-Archive -Path (Join-Path $tmp $archive) -DestinationPath (Join-Path $tmp 'x') -Force
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $exe = Join-Path $dir 'optimole.exe'
-        Copy-Item -Path (Join-Path $tmp 'x\optimole.exe') -Destination $exe -Force
+        # Copy next to the target under a unique name, then swap it in, so an interrupted copy never leaves a
+        # broken optimole.exe behind.
+        $staged = Join-Path $dir ('.optimole-' + [guid]::NewGuid() + '.exe')
+        Copy-Item -Path (Join-Path $tmp 'x\optimole.exe') -Destination $staged
+        try {
+            Move-Item -Path $staged -Destination $exe -Force
+        } finally {
+            Remove-Item -Force -Path $staged -ErrorAction SilentlyContinue
+        }
 
         Write-Host ("Installed " + (& $exe version))
         Write-Host "         to $exe"
@@ -75,5 +93,6 @@
         Write-Host "`nNext: optimole login   (paste an API key from the Optimole dashboard)"
     } finally {
         Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
+        [Net.ServicePointManager]::SecurityProtocol = $protocols
     }
 }
