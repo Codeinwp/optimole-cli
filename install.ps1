@@ -28,6 +28,8 @@
     }
     $archive = "optimole_windows_$arch.zip"
     $dir = if ($env:OPTIMOLE_INSTALL_DIR) { $env:OPTIMOLE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\optimole' }
+    # .NET resolves relative paths against the process directory, PowerShell against its location: settle it.
+    $dir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($dir)
 
     $protocols = [Net.ServicePointManager]::SecurityProtocol
     $tmp = $null
@@ -82,7 +84,13 @@
         try {
             [IO.File]::Copy((Join-Path $unpacked 'optimole.exe'), $staged)
             if ([IO.File]::Exists($exe)) {
-                [IO.File]::Replace($staged, $exe, [NullString]::Value)
+                try {
+                    [IO.File]::Replace($staged, $exe, [NullString]::Value)
+                } catch {
+                    # Replace can fail after removing the old file; then put the new one in place instead.
+                    if ([IO.File]::Exists($exe) -or -not [IO.File]::Exists($staged)) { throw }
+                    [IO.File]::Move($staged, $exe)
+                }
             } else {
                 [IO.File]::Move($staged, $exe)
             }
@@ -108,7 +116,12 @@
         }
         Write-Host "`nNext: optimole login   (paste an API key from the Optimole dashboard)"
     } finally {
-        if ($tmp -and [IO.Directory]::Exists($tmp)) { [IO.Directory]::Delete($tmp, $true) }
-        [Net.ServicePointManager]::SecurityProtocol = $protocols
+        try {
+            if ($tmp -and [IO.Directory]::Exists($tmp)) { [IO.Directory]::Delete($tmp, $true) }
+        } catch {
+            # A leftover temp folder is harmless; never let it skip restoring the session's TLS setting.
+        } finally {
+            [Net.ServicePointManager]::SecurityProtocol = $protocols
+        }
     }
 }

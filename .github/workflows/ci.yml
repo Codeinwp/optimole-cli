@@ -148,6 +148,13 @@ jobs:
           Get-Content -Raw install.ps1 | Invoke-Expression
           $exe = Join-Path $env:OPTIMOLE_INSTALL_DIR 'optimole.exe'
           if (-not (Test-Path -LiteralPath $exe)) { throw 'optimole.exe missing from the bracketed folder' }
+          # A relative folder resolves against PowerShell's location, not the process directory.
+          Push-Location $env:RUNNER_TEMP
+          $env:OPTIMOLE_INSTALL_DIR = '.\rel tools'
+          Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'install.ps1') | Invoke-Expression
+          if (-not (Test-Path -LiteralPath (Join-Path $env:RUNNER_TEMP 'rel tools\optimole.exe'))) { throw 'relative install folder resolved elsewhere' }
+          Pop-Location
+          $env:OPTIMOLE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP '[opt] tools'
           if (@(Get-ChildItem -LiteralPath $env:OPTIMOLE_INSTALL_DIR -Force).Count -ne 1) { throw 'staging files were left behind' }
           & $exe version
       - name: install.ps1 again (PowerShell 7, reinstall over the first)

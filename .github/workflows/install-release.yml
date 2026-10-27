@@ -31,7 +31,15 @@ jobs:
           echo "EXPECTED=${tag#v}" >> "$GITHUB_ENV"
           # The README one-liners install GitHub's "latest" release; check them only when that is this one
           # (a prerelease, or a release published without being marked latest, is not).
-          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          # Only "no latest release" (404) means skip; any other API failure fails the check.
+          if latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>"$RUNNER_TEMP/gh-err")"; then
+            :
+          elif grep -q 'HTTP 404' "$RUNNER_TEMP/gh-err"; then
+            latest=""
+          else
+            cat "$RUNNER_TEMP/gh-err" >&2
+            exit 1
+          fi
           echo "LATEST=$([ "$latest" = "$tag" ] && echo true || echo false)" >> "$GITHUB_ENV"
         env:
           GH_TOKEN: ${{ github.token }}
