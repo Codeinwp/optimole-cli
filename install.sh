@@ -87,8 +87,10 @@ else
 	dir="$HOME/.local/bin"
 fi
 mkdir -p "$dir" || fail "could not create $dir"
-cp "$tmp/optimole" "$dir/optimole.tmp" && chmod 0755 "$dir/optimole.tmp" && mv -f "$dir/optimole.tmp" "$dir/optimole" ||
+if ! { cp "$tmp/optimole" "$dir/optimole.tmp" && chmod 0755 "$dir/optimole.tmp" && mv -f "$dir/optimole.tmp" "$dir/optimole"; }; then
+	rm -f "$dir/optimole.tmp"
 	fail "could not write to $dir; set OPTIMOLE_INSTALL_DIR to a writable directory"
+fi
 
 printf 'Installed %s\n' "$("$dir/optimole" version)"
 printf '         to %s/optimole\n' "$dir"
