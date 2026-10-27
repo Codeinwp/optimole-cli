@@ -1,6 +1,7 @@
 name: Install check
 
-# Runs the one-command installs from the README against the published release, on every platform.
+# Runs the one-command installs from the README against the published release, on every platform:
+# once pinned to the release's tag, and, when the release is the latest one, exactly as the README shows.
 on:
   release:
     types: [published]
@@ -17,37 +18,79 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      SH_URL: https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.sh
+      PS_URL: https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.ps1
+      # A prerelease is never "latest", so the README one-liner would install another release.
+      LATEST: ${{ github.event.release.prerelease != true }}
     steps:
-      - name: Release to install
+      - name: Release to check
         shell: bash
         run: |
           tag="${{ github.event.release.tag_name }}"
           if [ -z "$tag" ]; then tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"; fi
-          # Install exactly this release (a prerelease is never "latest"), and expect exactly its version.
-          echo "OPTIMOLE_VERSION=$tag" >> "$GITHUB_ENV"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
           echo "EXPECTED=${tag#v}" >> "$GITHUB_ENV"
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: curl | sh
+
+      - name: Version check helper
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          curl -fsSL https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.sh | sh
+          cat > "$RUNNER_TEMP/check.sh" <<'EOF'
+          # "optimole 1.2.3 (commit …)": the version field must match exactly.
           for dir in /usr/local/bin "$HOME/.local/bin"; do
             if [ -x "$dir/optimole" ]; then
               out="$("$dir/optimole" version)"; echo "$out"
-              # "optimole 1.2.3 (commit …)": compare the version field exactly.
               [ "$(echo "$out" | awk '{ print $2 }')" = "$EXPECTED" ] && exit 0
               echo "expected version $EXPECTED" >&2; exit 1
             fi
           done
           echo "optimole was not installed" >&2
           exit 1
-      - name: irm | iex
+          EOF
+
+      - name: curl | sh, pinned to the tag
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL "$SH_URL" | OPTIMOLE_VERSION="$TAG" sh
+          bash "$RUNNER_TEMP/check.sh"
+
+      - name: curl | sh, exactly as in the README
+        if: runner.os != 'Windows' && env.LATEST == 'true'
+        shell: bash
+        run: |
+          curl -fsSL "$SH_URL" | sh
+          bash "$RUNNER_TEMP/check.sh"
+
+      - name: wget | sh, without curl on PATH
+        if: runner.os == 'Linux' && env.LATEST == 'true'
+        shell: bash
+        run: |
+          shim="$RUNNER_TEMP/no-curl"
+          mkdir -p "$shim"
+          for f in /usr/bin/* /bin/*; do ln -sf "$f" "$shim/" 2>/dev/null || true; done
+          rm -f "$shim/curl"
+          wget -qO- "$SH_URL" | PATH="$shim" sh
+          bash "$RUNNER_TEMP/check.sh"
+
+      - name: irm | iex, pinned to the tag (Windows PowerShell 5.1)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          irm https://raw.githubusercontent.com/Codeinwp/optimole-cli/main/install.ps1 | iex
+          $env:OPTIMOLE_VERSION = $env:TAG
+          irm $env:PS_URL | iex
+          $out = & (Join-Path $env:LOCALAPPDATA 'Programs\optimole\optimole.exe') version
+          Write-Host $out
+          if (($out -split '\s+')[1] -ne $env:EXPECTED) { throw "expected version $env:EXPECTED" }
+
+      - name: irm | iex, exactly as in the README (PowerShell 7)
+        if: runner.os == 'Windows' && env.LATEST == 'true'
+        shell: pwsh
+        run: |
+          irm $env:PS_URL | iex
           $out = & (Join-Path $env:LOCALAPPDATA 'Programs\optimole\optimole.exe') version
           Write-Host $out
           if (($out -split '\s+')[1] -ne $env:EXPECTED) { throw "expected version $env:EXPECTED" }
