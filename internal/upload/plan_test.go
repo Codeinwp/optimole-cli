@@ -214,12 +214,13 @@ func TestPlanTrailingSlashSymlink(t *testing.T) {
 
 // TestPlanKeepsInnerDotDot: "link/../photo.jpg" names the photo.jpg next to
 // the link's target, not the local one; only trailing separators and "."
-// segments are trimmed from arguments.
+// segments are trimmed from arguments. Windows applies ".." to the path text
+// first, so there it names the local one.
 func TestPlanKeepsInnerDotDot(t *testing.T) {
 	root := t.TempDir()
 	other := writeFile(t, root, "other/photo.jpg", 5)
 	writeFile(t, root, "other/subdir/x.jpg", 1)
-	writeFile(t, root, "work/photo.jpg", 7)
+	local := writeFile(t, root, "work/photo.jpg", 7)
 	if err := os.Symlink(filepath.Join(root, "other", "subdir"), filepath.Join(root, "work", "link")); err != nil {
 		t.Skipf("cannot create symlinks here: %v", err)
 	}
@@ -228,12 +229,16 @@ func TestPlanKeepsInnerDotDot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := os.Lstat(other)
+	wantPath, wantSize := other, int64(5)
+	if runtime.GOOS == "windows" {
+		wantPath, wantSize = local, 7
+	}
+	want, err := os.Lstat(wantPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Items) != 1 || plan.Items[0].Path != arg || plan.Items[0].Size != 5 || !os.SameFile(plan.Items[0].info, want) {
-		t.Fatalf("plan = %+v, want %s (the target's sibling)", plan.Items, other)
+	if len(plan.Items) != 1 || plan.Items[0].Path != arg || plan.Items[0].Size != wantSize || !os.SameFile(plan.Items[0].info, want) {
+		t.Fatalf("plan = %+v, want %s", plan.Items, wantPath)
 	}
 }
 
@@ -489,6 +494,14 @@ func TestTrimArg(t *testing.T) {
 		"..":            "..",
 		"../":           "..",
 		"a" + sep + ".": "a",
+	}
+	if runtime.GOOS == "windows" {
+		// "//" starts a UNC volume there, which is kept (with backslashes).
+		cases["///"] = `\\\`
+		cases[`C:\photos\`] = `C:\photos`
+		cases[`C:\photos\.`] = `C:\photos`
+		cases[`C:\`] = `C:\`
+		cases[`C:`] = `C:`
 	}
 	for in, want := range cases {
 		if got := trimArg(in); got != want {

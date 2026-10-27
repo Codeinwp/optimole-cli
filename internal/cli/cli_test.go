@@ -805,6 +805,8 @@ func TestOutputWriteErrors(t *testing.T) {
 // TestUploadDotDotAfterSymlinkStaysPhysical is the reported attack:
 // work/link -> data/leaf, data/album is real, work/album -> secrets.
 // "upload -r --create-folders work/link/.." must upload data/album/* only.
+// Windows applies ".." to the path text first: the argument is work, whose
+// two entries are symlinks, so nothing is uploaded.
 func TestUploadDotDotAfterSymlinkStaysPhysical(t *testing.T) {
 	base := tree(t, map[string]string{
 		"data/leaf/.keep":    "x",
@@ -823,6 +825,13 @@ func TestUploadDotDotAfterSymlinkStaysPhysical(t *testing.T) {
 	}
 	h := newHarness(t).withKey()
 	arg := filepath.Join(base, "work", "link") + string(filepath.Separator) + ".."
+	if runtime.GOOS == "windows" {
+		code := h.run("upload", "-r", "--create-folders", arg)
+		if code != ExitFailure || !strings.Contains(h.stderr.String(), "nothing to upload") || h.srv.Count(testserver.RouteCreate) != 0 {
+			t.Fatalf("exit %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+		}
+		return
+	}
 	if code := h.run("upload", "-r", "--create-folders", arg); code != ExitOK {
 		t.Fatalf("exit %d\n%s%s", code, h.stdout.String(), h.stderr.String())
 	}

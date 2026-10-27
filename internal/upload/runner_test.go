@@ -700,8 +700,13 @@ func TestRunRefusesFilesReplacedAfterPlanning(t *testing.T) {
 			mustSymlink(t, filepath.Join(outside, "sub"), filepath.Join(root, "sub"))
 		}, "replaced"},
 		{"file replaced by another file", false, func(t *testing.T, root string) {
-			mustRemove(t, filepath.Join(root, "a.jpg"))
-			writeBytes(t, root, "a.jpg", []byte("OTHER!"))
+			// Written aside, then renamed over a.jpg: while both exist they
+			// cannot share an inode. (Deleting first lets Linux reuse the
+			// old inode, and the new file is then the same file to stat.)
+			writeBytes(t, root, "new.tmp", []byte("OTHER!"))
+			if err := os.Rename(filepath.Join(root, "new.tmp"), filepath.Join(root, "a.jpg")); err != nil {
+				t.Fatal(err)
+			}
 		}, "replaced"},
 		{"file grew", false, func(t *testing.T, root string) {
 			writeBytes(t, root, "a.jpg", []byte("SECRET+more"))
