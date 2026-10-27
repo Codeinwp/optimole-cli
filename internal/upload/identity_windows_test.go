@@ -17,6 +17,8 @@ func TestExtendedPath(t *testing.T) {
 		`C:\x\..\` + deep:     `\\?\C:\` + deep, // cleaned first, as Windows would
 		`\\srv\share\` + deep: `\\?\UNC\srv\share\` + deep,
 		`\\?\C:\` + deep:      `\\?\C:\` + deep, // already extended
+		// Kept as given: cleaning would drop the trailing dot.
+		`\\?\C:\` + long + `\` + long + `\photos.\a.jpg`: `\\?\C:\` + long + `\` + long + `\photos.\a.jpg`,
 	}
 	for in, want := range cases {
 		if got := extendedPath(in); got != want {

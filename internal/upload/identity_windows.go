@@ -34,8 +34,15 @@ func pathIdentity(p string) (any, error) {
 // for its own calls: an absolute path of 248 characters or more gets the
 // \\?\ prefix (\\?\UNC\ for a share). Without it, Windows versions that do
 // not allow long paths refuse it. filepath.Abs applies Windows' own clean-up
-// first, which the prefix would otherwise skip.
+// first, which the prefix would otherwise skip. A path that is already
+// extended or a device path is kept as given: cleaning it could change which
+// file it names ("photos." would become "photos").
 func extendedPath(p string) string {
+	for _, prefix := range []string{`\\?\`, `\\.\`, `\??\`} {
+		if strings.HasPrefix(p, prefix) {
+			return p
+		}
+	}
 	abs, err := filepath.Abs(p)
 	if err != nil || len(abs) < 248 {
 		return p
