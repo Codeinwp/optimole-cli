@@ -64,22 +64,24 @@ type jobResult struct {
 	err  error
 }
 
-// onDisk reports whether the archive is already in place: a plain file of
-// the listed size (only checked archives are renamed into place).
+// onDisk reports whether the archive is already in place: a plain file, of
+// the listed size when there is one, in a plain domain folder. Only checked
+// archives are renamed into place.
 func onDisk(j job) bool {
-	if j.size < 0 {
+	if dir, err := os.Lstat(filepath.Dir(j.path)); err != nil || !dir.IsDir() {
 		return false
 	}
 	st, err := os.Lstat(j.path)
-	return err == nil && st.Mode().IsRegular() && st.Size() == j.size
+	return err == nil && st.Mode().IsRegular() && (j.size < 0 || st.Size() == j.size)
 }
 
 // download puts one archive at j.path. The bytes go to a ".part" file named
 // after the expected size, so a later run resumes only an archive of the same
 // size; the file is renamed into place once its size matches and every file
-// in it reads back with its checksum. That check also catches a resume that
-// joined two versions of the same size. A broken ZIP is downloaded once more
-// from scratch.
+// in it (in a compression format the reader knows) reads back with its
+// checksum. That check also catches a resume that joined two versions of the
+// same size. A broken ZIP is downloaded once more from scratch; an
+// interrupted check keeps the partial file for the next run.
 func (r *runner) download(ctx context.Context, j job) jobResult {
 	if err := realDir(filepath.Dir(j.path)); err != nil {
 		return jobResult{err: err}
@@ -93,7 +95,11 @@ func (r *runner) download(ctx context.Context, j job) jobResult {
 			res.err = err
 			return res
 		}
-		size, err := checkArchive(tmp, j.size)
+		size, err := checkArchive(ctx, tmp, j.size)
+		if ctx.Err() != nil {
+			res.err = ctx.Err()
+			return res
+		}
 		if err == nil {
 			if err := os.Rename(tmp, j.path); err != nil {
 				res.err = &writeError{err}
@@ -271,8 +277,8 @@ func retryable(err error) bool {
 
 // checkArchive checks the downloaded file's size and that it is a ZIP whose
 // every file reads back with its checksum, and returns the size. Files in a
-// compression format the reader lacks are not read.
-func checkArchive(path string, want int64) (int64, error) {
+// compression format the reader lacks are not read. It stops when ctx ends.
+func checkArchive(ctx context.Context, path string, want int64) (int64, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return 0, &writeError{err}
@@ -291,7 +297,7 @@ func checkArchive(path string, want int64) (int64, error) {
 			continue
 		}
 		if err == nil {
-			_, err = io.Copy(io.Discard, rc)
+			_, err = io.Copy(io.Discard, ctxReader{ctx, rc})
 			rc.Close()
 		}
 		if err != nil {
@@ -307,6 +313,19 @@ func backoff(failures int) time.Duration {
 		d = maxBackoff
 	}
 	return d
+}
+
+// ctxReader stops reading once ctx ends.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // stallReader pushes back the stall timer whenever bytes arrive.

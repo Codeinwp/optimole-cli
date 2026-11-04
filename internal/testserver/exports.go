@@ -198,11 +198,11 @@ func (s *Server) exportDetailLocked(e *fakeExport) map[string]any {
 	for _, d := range e.domains {
 		files := []map[string]any{}
 		for i := 0; i < d.listed; i++ {
-			files = append(files, map[string]any{
-				"part_number": i + 1,
-				"url":         s.archiveURLLocked(e.id, d.name, i+1),
-				"size":        len(d.archives[i]),
-			})
+			file := map[string]any{"part_number": i + 1, "url": s.archiveURLLocked(e.id, d.name, i+1)}
+			if !s.OmitArchiveSizes {
+				file["size"] = len(d.archives[i])
+			}
+			files = append(files, file)
 		}
 		domains = append(domains, map[string]any{"domain": d.name, "status": d.status, "zip_files": files})
 	}

@@ -136,6 +136,8 @@ type Server struct {
 	// LegacyExportConflicts answers export conflicts the way servers did
 	// before error codes: a 409 with only a message.
 	LegacyExportConflicts bool
+	// OmitArchiveSizes lists export archives without their size.
+	OmitArchiveSizes bool
 
 	mu          sync.Mutex
 	seq         int64

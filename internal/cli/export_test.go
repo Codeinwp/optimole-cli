@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -224,7 +225,7 @@ func TestExportDownloadStopsAndTellsHowToResume(t *testing.T) {
 	if code := h.run("export", "download", "latest", "-o", out, "--timeout", "150ms"); code != ExitFailure {
 		t.Fatalf("timeout: exit %d", code)
 	}
-	resume := `Resume with: optimole export download 1 -o "` + out + `"`
+	resume := "Resume with: optimole export download 1 -o " + shellQuote(out)
 	if !strings.Contains(h.stderr.String(), "timed out after 150ms") || !strings.Contains(h.stderr.String(), resume) {
 		t.Errorf("timeout stderr: %s", h.stderr.String())
 	}
@@ -426,5 +427,25 @@ func TestExportListFollowsCursors(t *testing.T) {
 	}
 	if n := len(g.jsonLines()); n != 2 || g.srv.Count(testserver.RouteExportList) != 2 {
 		t.Errorf("%d exports in %d pages", n, g.srv.Count(testserver.RouteExportList))
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	cases := map[string]string{
+		"out":                 "out",
+		"/backups/2026-11":    "/backups/2026-11",
+		`C:\Backups\Optimole`: `C:\Backups\Optimole`,
+	}
+	if runtime.GOOS == "windows" {
+		cases["my exports"] = `"my exports"`
+	} else {
+		cases["my exports"] = "'my exports'"
+		cases["it's"] = `'it'\''s'`
+		cases["$HOME"] = "'$HOME'"
+	}
+	for in, want := range cases {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
 	}
 }

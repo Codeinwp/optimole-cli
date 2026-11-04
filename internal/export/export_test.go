@@ -825,20 +825,27 @@ func TestRunRefusesAFolderAnotherRunHolds(t *testing.T) {
 }
 
 func TestRunManifestKeepsArchivesOfUnselectedDomains(t *testing.T) {
-	f := newFixture(t)
-	id := f.srv.AddExport(api.ExportCompleted,
-		testserver.ExportDomain{Domain: "a.com", Archives: [][]byte{zipOf(t, "a")}},
-		testserver.ExportDomain{Domain: "b.com", Archives: [][]byte{zipOf(t, "b")}},
-	)
-	f.run(context.Background(), id)
-	f.run(context.Background(), id, "a.com")
-	var m manifest
-	if err := json.Unmarshal(f.file(ManifestName), &m); err != nil {
-		t.Fatal(err)
-	}
-	for _, d := range m.Domains {
-		if !d.Archives[0].Downloaded {
-			t.Errorf("%s marked not downloaded after a filtered rerun", d.Domain)
+	for _, sizeless := range []bool{false, true} {
+		f := newFixture(t)
+		f.srv.OmitArchiveSizes = sizeless
+		id := f.srv.AddExport(api.ExportCompleted,
+			testserver.ExportDomain{Domain: "a.com", Archives: [][]byte{zipOf(t, "a")}},
+			testserver.ExportDomain{Domain: "b.com", Archives: [][]byte{zipOf(t, "b")}},
+		)
+		if out := f.run(context.Background(), id); out.Downloaded != 2 {
+			t.Fatalf("sizeless=%v: first run %+v", sizeless, out)
+		}
+		if out := f.run(context.Background(), id, "a.com"); out.Present != 1 {
+			t.Errorf("sizeless=%v: filtered rerun %+v", sizeless, out)
+		}
+		var m manifest
+		if err := json.Unmarshal(f.file(ManifestName), &m); err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range m.Domains {
+			if !d.Archives[0].Downloaded {
+				t.Errorf("sizeless=%v: %s marked not downloaded after a filtered rerun", sizeless, d.Domain)
+			}
 		}
 	}
 }
@@ -866,6 +873,29 @@ func TestRunRefusesLinksInTheExportFolder(t *testing.T) {
 			t.Errorf("wrote through the link: %v", entries)
 		}
 	})
+	t.Run("domain folder holding a matching archive", func(t *testing.T) {
+		f := newFixture(t)
+		id := f.srv.AddExport(api.ExportCompleted,
+			testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{data}},
+			testserver.ExportDomain{Domain: "other.com", Archives: [][]byte{data}},
+		)
+		elsewhere := t.TempDir()
+		os.WriteFile(filepath.Join(elsewhere, "images-1.zip"), data, 0o644)
+		os.MkdirAll(f.dir, 0o755)
+		link(t, elsewhere, filepath.Join(f.dir, "example.com"))
+		link(t, elsewhere, filepath.Join(f.dir, "other.com"))
+		out := f.run(context.Background(), id, "example.com")
+		if out.Present != 0 || out.Failed != 1 {
+			t.Fatalf("outcome: %+v", out)
+		}
+		var m manifest
+		json.Unmarshal(f.file(ManifestName), &m)
+		for _, d := range m.Domains {
+			if d.Archives[0].Downloaded {
+				t.Errorf("%s: an archive behind a link counted as downloaded", d.Domain)
+			}
+		}
+	})
 	t.Run("partial file and manifest", func(t *testing.T) {
 		os.WriteFile(victim, []byte("keep me"), 0o644)
 		f := newFixture(t)
@@ -885,4 +915,45 @@ func TestRunRefusesLinksInTheExportFolder(t *testing.T) {
 			t.Error("archive differs")
 		}
 	})
+}
+
+// endsOnceComplete is a context that reports Canceled once path holds size
+// bytes: the download completes, and the check that follows sees the end.
+type endsOnceComplete struct {
+	context.Context
+	path string
+	size int64
+}
+
+func (c endsOnceComplete) Err() error {
+	if st, err := os.Stat(c.path); err == nil && st.Size() == c.size {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestDownloadKeepsThePartialFileWhenTheCheckIsInterrupted(t *testing.T) {
+	f := newFixture(t)
+	data := zipOf(t, "a.jpg", "b.jpg")
+	id := f.srv.AddExport(api.ExportCompleted, testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{data}})
+	exp, err := f.client.GetExport(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := job{path: filepath.Join(f.dir, "example.com", "images-1.zip"), url: exp.Domains[0].Parts[0].URL, size: int64(len(data))}
+	res := f.newRunner().download(endsOnceComplete{context.Background(), tempPath(j), j.size}, j)
+	if !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("got %+v", res)
+	}
+	if st, err := os.Stat(tempPath(j)); err != nil || st.Size() != j.size {
+		t.Errorf("partial file: %v", err)
+	}
+	if _, err := os.Stat(j.path); !os.IsNotExist(err) {
+		t.Errorf("archive put in place unchecked: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := checkArchive(ctx, tempPath(j), j.size); !errors.Is(err, context.Canceled) {
+		t.Errorf("check on an ended context: %v", err)
+	}
 }

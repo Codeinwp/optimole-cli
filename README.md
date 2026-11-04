@@ -295,7 +295,8 @@ downloaded. It holds no download URLs. The archives are not unpacked.
 - While the export runs, the CLI checks it every 5 seconds (less often after a few minutes) and downloads each
   archive as soon as the server lists it.
 - An archive is written to `images-N.zip.<size>.part` and renamed into place only when its size matches what
-  the server listed and every file in it reads back with its checksum. A download that gets cut is resumed
+  the server listed and every file in it reads back with its checksum (files in a compression format Go's ZIP
+  reader lacks are not read; Optimole's archives use deflate). A download that gets cut is resumed
   where it stopped; one that stalls for 2 minutes is restarted. An archive that fails the check (a resume that
   joined two versions of a rewritten archive, for example) is downloaded once more from scratch, then reported
   as failed. An archive whose size neither the server nor storage gives is not downloaded.

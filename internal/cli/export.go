@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Codeinwp/optimole-cli/internal/api"
 	"github.com/Codeinwp/optimole-cli/internal/export"
@@ -259,6 +262,22 @@ func startExport(ctx context.Context, env Env, sess *session) (int64, bool, int)
 	return 0, false, exportError(env, sess, name, firstCancel(ctx, err))
 }
 
+// shellQuote writes a path for a command to paste: as is when it needs no
+// quotes, else in single quotes (double quotes on Windows, where a path
+// cannot contain them).
+func shellQuote(s string) string {
+	plain := s != "" && strings.IndexFunc(s, func(r rune) bool {
+		return !(r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r)) || strings.ContainsRune(`._-/\:+,@%=`, r))
+	}) < 0
+	switch {
+	case plain:
+		return s
+	case runtime.GOOS == "windows":
+		return `"` + s + `"`
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // firstCancel returns the context's error when it ended (so Ctrl-C during
 // a fallback lookup still exits 130), else err.
 func firstCancel(ctx context.Context, err error) error {
@@ -342,7 +361,7 @@ func downloadExport(ctx, runCtx context.Context, env Env, sess *session, rep *ou
 	if interrupted || timedOut {
 		resume := fmt.Sprintf("optimole export download %d", id)
 		if df.output != "." {
-			resume += " -o " + strconv.Quote(df.output)
+			resume += " -o " + shellQuote(df.output)
 		}
 		fmt.Fprintf(env.Stderr, "Export %d continues on the server. Resume with: %s\n", id, resume)
 	}
