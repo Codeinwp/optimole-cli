@@ -159,9 +159,6 @@ type Server struct {
 	exportTemplate []ExportDomain
 	exportsPaused  bool
 	urlGeneration  int
-
-	inflightDownloads int
-	maxDownloads      int
 }
 
 // New starts a fake and closes it when the test ends. The test fails if a

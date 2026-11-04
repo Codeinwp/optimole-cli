@@ -793,13 +793,45 @@ func TestRunLimitsParallelDownloads(t *testing.T) {
 		archives = append(archives, zipOf(t, fmt.Sprintf("f%d", i)))
 	}
 	id := f.srv.AddExport(api.ExportCompleted, testserver.ExportDomain{Domain: "example.com", Archives: archives})
-	f.srv.DownloadDelay = 30 * time.Millisecond
-	out := Run(context.Background(), Options{Client: f.client, ExportID: id, Dir: f.dir, Concurrency: 3, Sleep: immediate})
+
+	// The first three downloads wait until all three have arrived, then a
+	// little longer, so a fourth one would be seen if the limit let it start.
+	const limit = 3
+	var mu sync.Mutex
+	arrived, waiting, most := 0, 0, 0
+	all := make(chan struct{})
+	f.srv.Hook = func(route testserver.Route, _ *http.Request) {
+		if route != testserver.RouteDownload {
+			return
+		}
+		mu.Lock()
+		arrived++
+		first := arrived <= limit
+		if arrived == limit {
+			close(all)
+		}
+		waiting++
+		most = max(most, waiting)
+		mu.Unlock()
+		if first {
+			select {
+			case <-all:
+				time.Sleep(50 * time.Millisecond)
+			case <-time.After(5 * time.Second):
+			}
+		}
+		mu.Lock()
+		waiting--
+		mu.Unlock()
+	}
+	out := Run(context.Background(), Options{Client: f.client, ExportID: id, Dir: f.dir, Concurrency: limit, Sleep: immediate})
 	if out.Err != nil || out.Downloaded != 7 {
 		t.Fatalf("outcome: %+v", out)
 	}
-	if n := f.srv.MaxConcurrentDownloads(); n != 3 {
-		t.Errorf("at most %d downloads at once, want 3", n)
+	mu.Lock()
+	defer mu.Unlock()
+	if most != limit {
+		t.Errorf("at most %d downloads at once, want %d", most, limit)
 	}
 }
 
