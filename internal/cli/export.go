@@ -51,8 +51,8 @@ const downloadFlagsUsage = `  -o, --output DIR     Folder the export folder goes
 `
 
 const downloadNotes = `
-Ctrl-C and --timeout stop only the CLI: the export continues on the server,
-and "optimole export download ID" picks up where the run stopped.
+Ctrl-C and --timeout stop only the CLI, never the export on the server, and
+"optimole export download ID" picks up where the run stopped.
 
 Exit codes: 0 the export completed and every selected archive is downloaded,
 1 the export failed or was cancelled, an archive failed, or the timeout passed,
@@ -372,7 +372,11 @@ func downloadExport(ctx, runCtx context.Context, env Env, sess *session, rep *ou
 		if df.output != "." {
 			resume += " -o " + shellQuote(df.output)
 		}
-		fmt.Fprintf(env.Stderr, "Export %d continues on the server. Resume with: %s\n", id, resume)
+		if out.Export != nil && api.IsFinalStatus(out.Export.Status) {
+			fmt.Fprintf(env.Stderr, "Resume with: %s\n", resume)
+		} else {
+			fmt.Fprintf(env.Stderr, "Export %d continues on the server. Resume with: %s\n", id, resume)
+		}
 	}
 	switch {
 	case interrupted:

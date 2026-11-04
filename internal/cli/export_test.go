@@ -225,7 +225,7 @@ func TestExportDownloadStopsAndTellsHowToResume(t *testing.T) {
 	if code := h.run("export", "download", "latest", "-o", out, "--timeout", "150ms"); code != ExitFailure {
 		t.Fatalf("timeout: exit %d", code)
 	}
-	resume := "Resume with: optimole export download 1 -o " + shellQuote(out)
+	resume := "Export 1 continues on the server. Resume with: optimole export download 1 -o " + shellQuote(out)
 	if !strings.Contains(h.stderr.String(), "timed out after 150ms") || !strings.Contains(h.stderr.String(), resume) {
 		t.Errorf("timeout stderr: %s", h.stderr.String())
 	}
@@ -240,6 +240,23 @@ func TestExportDownloadStopsAndTellsHowToResume(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), resume) || !strings.Contains(h.stdout.String(), "Interrupted.") {
 		t.Errorf("interrupt: stdout %s stderr %s", h.stdout.String(), h.stderr.String())
+	}
+}
+
+func TestExportDownloadOfFinishedExportStopsWithoutServerHint(t *testing.T) {
+	h := newHarness(t).withKey()
+	h.srv.AddExport("completed", testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{archive(t, "a")}})
+	h.srv.DownloadDelay = time.Second
+	out := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	if code := h.runCtx(ctx, "export", "download", "1", "-o", out); code != ExitInterrupted {
+		t.Fatalf("exit %d", code)
+	}
+	stderr := h.stderr.String()
+	if !strings.Contains(stderr, "Resume with: optimole export download 1 -o "+shellQuote(out)) || strings.Contains(stderr, "continues on the server") {
+		t.Errorf("stderr: %s", stderr)
 	}
 }
 

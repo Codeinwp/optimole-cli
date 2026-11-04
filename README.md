@@ -307,7 +307,7 @@ downloaded. It holds no download URLs. The archives are not unpacked.
   listed an archive with a new size (it rewrote it), that archive is downloaded again.
 - Download URLs are valid for a day; when storage refuses one, the CLI asks the server for a fresh one.
   Download URLs never get the API key and are never printed, and redirects are refused.
-- Ctrl-C and `--timeout` stop only the CLI. The export continues on the server, and the command prints how to
+- Ctrl-C and `--timeout` stop only the CLI, never the export on the server, and the command prints how to
   resume (`optimole export download ID`). There is no way to cancel an export from the API.
 
 #### Output
