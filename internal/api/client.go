@@ -1,6 +1,7 @@
 // Package api is a small client for the parts of the Optimole dashboard API
 // the CLI uses: reserving an asset, sending its bytes to the presigned storage
-// URL, completing it, and listing folders.
+// URL, completing it, listing folders, and running asset exports and
+// downloading their archives.
 package api
 
 import (
@@ -108,9 +109,10 @@ func New(opts Options) (*Client, error) {
 			// GET or send the key somewhere unexpected.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		// No overall timeout: a 100 MB body can take a while. The context and
-		// the transport's header timeout bound it instead. Redirects are
-		// refused: following one would replay the file to another host.
+		// No overall timeout: a 100 MB upload or a 1 GB archive download can
+		// take a while. The context and the transport's header timeout bound
+		// it instead. Redirects are refused: following one would replay the
+		// file to another host.
 		storage: &http.Client{
 			Transport:     transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

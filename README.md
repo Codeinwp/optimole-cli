@@ -1,11 +1,12 @@
 # optimole
 
 `optimole` uploads local files into an [Optimole](https://optimole.com) media library, into the folders you
-choose. It is a single binary with no dependencies.
+choose, and exports the library back as ZIP archives. It is a single binary with no dependencies.
 
 ```sh
 optimole login                                   # paste your API key once
 optimole upload -r ./photos --folder Campaigns   # photos/2024/a.jpg -> Campaigns/2024
+optimole export start                            # export the library, download ./optimole-export-ID
 ```
 
 ## Install
@@ -67,7 +68,7 @@ the storage URL the file bytes go to.
 
 **Folder-scoped keys** (the ones starting with `optml-s`) work for uploads into the folders they were
 granted (and their subfolders): always pass `--folder` (or `--folder-id`). They cannot create folders
-(`folder_creation_forbidden`), upload into the library root (`folder_required`), or list folders.
+(`folder_creation_forbidden`), upload into the library root (`folder_required`), list folders, or export.
 
 The API base URL defaults to `https://dashboard.optimole.com/api`; override it with `--api-url` or
 `OPTIMOLE_API_URL` (for example to try another environment). Only `https` URLs are
@@ -242,6 +243,103 @@ ID  PATH
 
 Folder-scoped keys cannot list folders (the API answers 403); `upload --folder PATH` still works with them.
 
+### `optimole export <command>`
+
+Exports the original files of the whole library and downloads them. An export covers every whitelisted
+domain of the account, plus `directUpload` for the files uploaded straight to the library; the server zips
+each domain into archives of about 1 GB. Exports need a full-access API key.
+
+| Command | What it does |
+|---|---|
+| `optimole export start [flags]` | Starts an export, follows it and downloads each archive as soon as it is ready. If an export is already running, follows that one instead. `--no-wait` only starts it and prints its ID. |
+| `optimole export download [ID\|latest] [flags]` | Downloads an existing export (default: the latest), waiting while it runs. Run it again to resume. |
+| `optimole export status [ID\|latest] [--json]` | Shows the export's status and each domain's status, archives and size. |
+| `optimole export list [--json]` | Lists the account's exports, newest first. |
+| `optimole export delete ID` | Deletes a finished export and its archives on the server (local files are not touched). |
+
+`start` and `download` take:
+
+| Flag | Meaning |
+|---|---|
+| `-o`, `--output DIR` | Where the export folder goes (default: the current folder). |
+| `--domain NAME` | Only download this domain's archives (repeatable, case-insensitive). The export itself always covers every domain. |
+| `-c`, `--concurrency N` | Archives downloaded in parallel, 1-8 (default 2). |
+| `--timeout DURATION` | Give up after this long, e.g. `90m` or `2h` (default: no limit). |
+| `--json` | One JSON object per event and a final summary object. |
+
+```sh
+optimole export start                          # start, wait, download everything
+optimole export start --no-wait                # start it now, download later
+optimole export download                       # the latest export, into ./optimole-export-ID
+optimole export download 42 -o /backups --domain example.com
+```
+
+#### Where the files go
+
+```text
+optimole-export-42/
+  example.com/images-1.zip
+  example.com/images-2.zip
+  directUpload/images-1.zip
+  export.json
+```
+
+Each domain gets a folder named after it. Domain names come from the server, so the CLI keeps only letters,
+digits, `.`, `-` and `_` (anything else becomes `_`, so `*.example.com` becomes `_.example.com`), drops leading
+and trailing dots, avoids Windows device names, and adds `-2`, `-3`... when two names differ only in case.
+`export.json` maps each domain to its folder and lists its archives with their size and whether they are
+downloaded. It holds no download URLs. The archives are not unpacked.
+
+#### How downloads work
+
+- While the export runs, the CLI checks it every 5 seconds (less often after a few minutes) and downloads each
+  archive as soon as the server lists it.
+- An archive is written to `images-N.zip.<size>.part` and renamed into place only when its size matches what
+  the server listed and it opens as a ZIP. A download that gets cut is resumed where it stopped; one that
+  stalls for 2 minutes is restarted. An archive that is not a valid ZIP is downloaded once more, then reported
+  as failed.
+- Running `download` again skips the archives already in place and resumes the partial ones. If the server
+  listed an archive with a new size (it rewrote it), that archive is downloaded again.
+- Download URLs are valid for a day; when storage refuses one, the CLI asks the server for a fresh one.
+  Download URLs never get the API key and are never printed, and redirects are refused.
+- Ctrl-C and `--timeout` stop only the CLI. The export continues on the server, and the command prints how to
+  resume (`optimole export download ID`). There is no way to cancel an export from the API.
+
+#### Output
+
+```text
+Started export 42.
+Export 42: running
+  example.com: running
+  directUpload: running
+downloading optimole-export-42/example.com/images-1.zip (1.0 GB)
+downloaded  optimole-export-42/example.com/images-1.zip (1.0 GB in 41s)
+  directUpload: completed, no files
+...
+Export 42: completed
+
+Export 42 completed: 2 downloaded, 0 already there, 0 failed (1.8 GB written) in optimole-export-42.
+```
+
+With `--json`:
+
+```json
+{"event":"started","id":42,"created":true}
+{"event":"export","id":42,"status":"running"}
+{"event":"domain","domain":"example.com","status":"running","archives":0}
+{"event":"downloading","domain":"example.com","part":1,"path":"optimole-export-42/example.com/images-1.zip","size":1073741824}
+{"event":"archive","domain":"example.com","part":1,"path":"optimole-export-42/example.com/images-1.zip","status":"downloaded","size":1073741824,"seconds":41}
+{"summary":{"id":42,"status":"completed","dir":"optimole-export-42","downloaded":2,"present":0,"failed":0,"bytes":1932735283,"failed_domains":[],"interrupted":false,"timed_out":false}}
+```
+
+An archive's `status` is `downloaded`, `present` (already on disk) or `failed` (with `error`). `created` is
+`false` when the command follows an export that was already running.
+
+An export is `queued`, `running`, `completed`, `failed` or `cancelled`. Once every domain has finished, it is
+`failed` if one of them failed; the other domains' archives are still downloaded, and the command exits 1. An account keeps at most 5
+exports (`export_limit_reached`); delete one with `optimole export delete ID`, or wait: finished exports are
+deleted automatically 10 days after they finish.
+
 ### `optimole login`, `optimole logout`
 
 `login` reads the key from stdin: type or paste it at the prompt, or pipe it (`optimole login < key.txt`;
@@ -258,9 +356,9 @@ Prints the version, commit and build date.
 
 | Code | Meaning |
 |---|---|
-| 0 | Every selected file was uploaded (skipped files do not count). |
-| 1 | At least one file failed, there was nothing to upload, or the output could not be written. |
-| 2 | Usage or configuration error (bad flags, a directory without `-r`, missing key, non-https URL). Nothing was uploaded. |
+| 0 | Every selected file was uploaded (skipped files do not count). For `export start` and `export download`: the export completed and every selected archive is on disk. |
+| 1 | At least one file failed, there was nothing to upload, or the output could not be written. For exports: the export failed or was cancelled, an archive failed, `--timeout` passed, or the account keeps the most exports it may. |
+| 2 | Usage or configuration error (bad flags, a directory without `-r`, an unknown `--domain`, missing key, non-https URL). Nothing was uploaded or downloaded. |
 | 130 | Interrupted with Ctrl-C. |
 
 ## Limits
@@ -271,6 +369,8 @@ Prints the version, commit and build date.
 - The API allows 300 requests per minute per account; each file takes 2 API requests plus the storage upload,
   so very large batches may see `429` answers, which the CLI waits out.
 - A presigned upload URL is valid for 15 minutes.
+- An account runs one export at a time and keeps at most 5. Export archives are about 1 GB each (a part can be
+  larger when its first files are), and their download URLs are valid for a day.
 
 ## Development
 

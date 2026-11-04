@@ -1,7 +1,8 @@
 // Package testserver is an in-memory fake of the dashboard's unified upload API
 // and of the presigned storage endpoint, for tests only. It follows the API
 // contract: POST /api/assets, PUT to the presigned URL, POST
-// /api/assets/{key}/completion and GET /api/folders.
+// /api/assets/{key}/completion, GET /api/folders, the /api/asset-exports
+// endpoints and GETs of the export archives.
 package testserver
 
 import (
@@ -51,6 +52,15 @@ type Response struct {
 	// storing the bytes) and then drops the connection instead of answering:
 	// the client cannot tell whether the request took effect.
 	CommitThenClose bool
+	// CutAfter (archive downloads) sends the real answer but drops the
+	// connection after this many body bytes.
+	CutAfter int64
+	// StallAfter (archive downloads) sends this many body bytes, then
+	// nothing until the client gives up.
+	StallAfter int64
+	// IgnoreRange (archive downloads) answers 200 with the whole archive
+	// despite a Range header.
+	IgnoreRange bool
 }
 
 // Key is an API key the fake accepts.
@@ -97,6 +107,8 @@ type Event struct {
 	Resolved      int64 // folder the asset landed in
 	Key           string
 	Query         string
+	// Range is the Range header of an archive download.
+	Range string
 }
 
 // Server is the fake. Create it with New.
@@ -119,6 +131,9 @@ type Server struct {
 	UploadExpiresIn time.Duration
 	// Hook, when set, runs at the start of every request (outside the lock).
 	Hook func(route Route, r *http.Request)
+	// LegacyExportConflicts answers export conflicts the way servers did
+	// before error codes: a 409 with only a message.
+	LegacyExportConflicts bool
 
 	mu          sync.Mutex
 	seq         int64
@@ -133,6 +148,12 @@ type Server struct {
 	violations  []string
 	inflightPut int
 	maxPut      int
+
+	exports        map[int64]*fakeExport
+	nextExport     int64
+	exportTemplate []ExportDomain
+	exportsPaused  bool
+	urlGeneration  int
 }
 
 // New starts a fake and closes it when the test ends. The test fails if a
@@ -149,8 +170,16 @@ func New(t testing.TB) *Server {
 	api.HandleFunc("/api/assets", s.handleCreate)
 	api.HandleFunc("/api/assets/", s.handleComplete)
 	api.HandleFunc("/api/folders", s.handleFolders)
+	api.HandleFunc("/api/asset-exports", s.handleExports)
+	api.HandleFunc("/api/asset-exports/", s.handleExport)
 	s.API = httptest.NewServer(api)
-	s.S3 = httptest.NewServer(http.HandlerFunc(s.handlePut))
+	s.S3 = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/exports/") {
+			s.handleDownload(w, r)
+			return
+		}
+		s.handlePut(w, r)
+	}))
 	s.URL = s.API.URL + "/api"
 	t.Cleanup(func() {
 		s.API.Close()

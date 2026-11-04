@@ -23,6 +23,11 @@ const (
 	CodeFolderRequired = "folder_required"
 	// CodeFolderCreationForbidden: a folder-scoped key asked to create folders.
 	CodeFolderCreationForbidden = "folder_creation_forbidden"
+	// CodeExportInProgress: an export is already queued or running (its ID
+	// comes in ExportID).
+	CodeExportInProgress = "export_in_progress"
+	// CodeExportLimitReached: the account keeps the most exports it may.
+	CodeExportLimitReached = "export_limit_reached"
 )
 
 // Error is a non-2xx answer from the dashboard API.
@@ -34,8 +39,10 @@ type Error struct {
 	Message    string
 	// Fields holds the validation messages of a 422, keyed by field.
 	Fields map[string][]string
-	// Limit and Count come with upload_limit_reached.
+	// Limit and Count come with upload_limit_reached and export_limit_reached.
 	Limit, Count FlexInt
+	// ExportID comes with export_in_progress.
+	ExportID FlexInt
 	// Expected and Actual come with upload_size_mismatch.
 	Expected, Actual FlexInt
 	// RetryAfter is the parsed Retry-After header, if any.
@@ -55,6 +62,9 @@ func (e *Error) Error() string {
 	}
 	if e.Limit.Valid || e.Count.Valid {
 		details = append(details, fmt.Sprintf("limit %s, used %s", flexString(e.Limit), flexString(e.Count)))
+	}
+	if e.ExportID.Valid {
+		details = append(details, fmt.Sprintf("export %d", e.ExportID.Value))
 	}
 	if e.Expected.Valid || e.Actual.Valid {
 		details = append(details, fmt.Sprintf("expected %s bytes, storage has %s", flexString(e.Expected), flexString(e.Actual)))
@@ -116,14 +126,16 @@ func (e *NetworkError) Error() string {
 
 func (e *NetworkError) Unwrap() error { return e.Err }
 
-// StorageError is a failed PUT to the presigned storage URL.
+// StorageError is a failed request to a presigned storage URL.
 type StorageError struct {
+	// Op names the request; empty means the upload PUT.
+	Op string
 	// StatusCode is 0 when no HTTP answer arrived (network error).
 	StatusCode int
 	Code       string
 	Message    string
 	Err        error
-	// Attempts is how many PUTs were made to the URL.
+	// Attempts is how many requests were made to the URL.
 	Attempts int
 	// Uncertain is set when an attempt got no answer or a 5xx, so the bytes
 	// may have been stored under this asset after all.
@@ -156,10 +168,14 @@ func (e *StorageError) Error() string {
 	if e.Expired {
 		extra = append(extra, "the upload URL expired")
 	}
-	if len(extra) == 0 {
-		return "upload to storage: " + msg
+	op := e.Op
+	if op == "" {
+		op = "upload to storage"
 	}
-	return fmt.Sprintf("upload to storage: %s (%s)", msg, strings.Join(extra, "; "))
+	if len(extra) == 0 {
+		return op + ": " + msg
+	}
+	return fmt.Sprintf("%s: %s (%s)", op, msg, strings.Join(extra, "; "))
 }
 
 func (e *StorageError) Unwrap() error { return e.Err }
@@ -193,6 +209,7 @@ func parseError(op string, resp *http.Response, body []byte, now time.Time) *Err
 		Count    FlexInt                    `json:"count"`
 		Expected FlexInt                    `json:"expected"`
 		Actual   FlexInt                    `json:"actual"`
+		ExportID FlexInt                    `json:"export_id"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		ct := resp.Header.Get("Content-Type")
@@ -206,6 +223,7 @@ func parseError(op string, resp *http.Response, body []byte, now time.Time) *Err
 	e.Code = payload.Code
 	e.Limit, e.Count = payload.Limit, payload.Count
 	e.Expected, e.Actual = payload.Expected, payload.Actual
+	e.ExportID = payload.ExportID
 	if len(payload.Errors) > 0 {
 		e.Fields = make(map[string][]string, len(payload.Errors))
 		for field, raw := range payload.Errors {

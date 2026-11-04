@@ -1,5 +1,6 @@
-// Package output prints upload results as human-readable lines or as JSON
-// lines, and keeps the counts for the final summary.
+// Package output prints the results of uploads and export downloads as
+// human-readable lines or as JSON lines, and keeps the counts for the final
+// summary.
 package output
 
 import (
