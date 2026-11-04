@@ -126,7 +126,8 @@ type Server struct {
 	CompleteDelay time.Duration
 	// PutDelay slows down storage uploads.
 	PutDelay time.Duration
-	// DownloadDelay slows down archive downloads.
+	// DownloadDelay slows down archive downloads; a request the client
+	// cancels stops waiting and gets no answer.
 	DownloadDelay time.Duration
 	// UploadExpiresIn sets the expires_at of new upload URLs (default 15
 	// minutes; negative values give URLs that are already expired).

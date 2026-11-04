@@ -415,7 +415,11 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 	if s.DownloadDelay > 0 {
-		time.Sleep(s.DownloadDelay)
+		select {
+		case <-time.After(s.DownloadDelay):
+		case <-r.Context().Done():
+			return
+		}
 	}
 	if r.Header.Get("Authorization") != "" {
 		s.violate("archive download carried an Authorization header")

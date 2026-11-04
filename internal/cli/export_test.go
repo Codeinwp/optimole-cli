@@ -246,11 +246,17 @@ func TestExportDownloadStopsAndTellsHowToResume(t *testing.T) {
 func TestExportDownloadOfFinishedExportStopsWithoutServerHint(t *testing.T) {
 	h := newHarness(t).withKey()
 	h.srv.AddExport("completed", testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{archive(t, "a")}})
-	h.srv.DownloadDelay = time.Second
+	h.srv.DownloadDelay = 10 * time.Second
 	out := t.TempDir()
 
+	// Stop once the archive download starts: by then the CLI has seen the
+	// export finished.
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(200*time.Millisecond, cancel)
+	h.srv.Hook = func(route testserver.Route, _ *http.Request) {
+		if route == testserver.RouteDownload {
+			cancel()
+		}
+	}
 	if code := h.runCtx(ctx, "export", "download", "1", "-o", out); code != ExitInterrupted {
 		t.Fatalf("exit %d", code)
 	}
