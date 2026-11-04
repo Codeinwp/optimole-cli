@@ -234,12 +234,14 @@ func startExport(ctx context.Context, env Env, sess *session) (int64, bool, int)
 			return apiErr.ExportID.Value, false, ExitOK
 		}
 		// Servers without error codes answer both conflicts with a bare 409:
-		// the list says which one it is.
+		// the list says which one it is. Below the limit the conflict can
+		// only be the newest export, running then (it may have finished
+		// since).
 		exports, listErr := listAllExports(ctx, sess.client)
 		if listErr != nil {
 			return 0, false, exportError(env, sess, name, err)
 		}
-		if len(exports) > 0 && !api.IsFinalStatus(exports[0].Status) {
+		if apiErr.Code != api.CodeExportLimitReached && len(exports) > 0 && (!api.IsFinalStatus(exports[0].Status) || len(exports) < exportLimit) {
 			return exports[0].ID, false, ExitOK
 		}
 		fmt.Fprintf(env.Stderr, "optimole %s: %s\n", name, sess.redact.Error(err))

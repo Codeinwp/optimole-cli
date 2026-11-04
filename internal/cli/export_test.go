@@ -128,6 +128,32 @@ func TestExportStartFollowsTheRunningExport(t *testing.T) {
 	}
 }
 
+func TestExportStartFollowsAnExportThatFinishedAfterTheConflict(t *testing.T) {
+	h := newHarness(t).withKey()
+	// An older server's bare 409 for a running export, which finished
+	// before the CLI looked at the list.
+	h.srv.AddExport("completed", testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{archive(t, "a")}})
+	h.srv.Inject(testserver.RouteExportCreate, testserver.Response{Status: 409, Body: `{"message":"Asset export is already in progress"}`})
+	out := t.TempDir()
+	if code := h.run("export", "start", "-o", out); code != ExitOK {
+		t.Fatalf("exit %d, stderr %s", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stdout.String(), "Export 1 is already running; following it.") || !strings.Contains(h.stdout.String(), "Export 1 completed: 1 downloaded") {
+		t.Errorf("stdout: %s", h.stdout.String())
+	}
+}
+
+func TestExportStartTrustsTheLimitCode(t *testing.T) {
+	h := newHarness(t).withKey()
+	// The limit was reached, then an export was deleted before the CLI
+	// looked at the list: still not an export to follow.
+	h.srv.AddExport("completed")
+	h.srv.Inject(testserver.RouteExportCreate, testserver.Response{Status: 409, Body: `{"code":"export_limit_reached","message":"Maximum asset export count reached (Limit: 5)","limit":5,"count":5}`})
+	if code := h.run("export", "start"); code != ExitFailure || !strings.Contains(h.stderr.String(), `"optimole export delete ID"`) {
+		t.Fatalf("exit %d, stderr %s", code, h.stderr.String())
+	}
+}
+
 func TestExportStartAtTheLimit(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		h := newHarness(t).withKey()
