@@ -263,17 +263,24 @@ func startExport(ctx context.Context, env Env, sess *session) (int64, bool, int)
 }
 
 // shellQuote writes a path for a command to paste: as is when it needs no
-// quotes, else in single quotes (double quotes on Windows, where a path
-// cannot contain them).
+// quotes, else in single quotes, or on Windows in double quotes (a path
+// cannot contain them), where a backslash run before the closing quote is
+// doubled so it does not escape the quote. A backslash needs quotes outside
+// Windows.
 func shellQuote(s string) string {
+	windows := runtime.GOOS == "windows"
 	plain := s != "" && strings.IndexFunc(s, func(r rune) bool {
-		return !(r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r)) || strings.ContainsRune(`._-/\:+,@%=`, r))
+		if r == '\\' {
+			return !windows
+		}
+		return !(r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r)) || strings.ContainsRune("._-/:+,@%=", r))
 	}) < 0
 	switch {
 	case plain:
 		return s
-	case runtime.GOOS == "windows":
-		return `"` + s + `"`
+	case windows:
+		trailing := len(s) - len(strings.TrimRight(s, `\`))
+		return `"` + s + strings.Repeat(`\`, trailing) + `"`
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

@@ -432,16 +432,18 @@ func TestExportListFollowsCursors(t *testing.T) {
 
 func TestShellQuote(t *testing.T) {
 	cases := map[string]string{
-		"out":                 "out",
-		"/backups/2026-11":    "/backups/2026-11",
-		`C:\Backups\Optimole`: `C:\Backups\Optimole`,
+		"out":              "out",
+		"/backups/2026-11": "/backups/2026-11",
 	}
 	if runtime.GOOS == "windows" {
+		cases[`C:\Backups\Optimole`] = `C:\Backups\Optimole`
 		cases["my exports"] = `"my exports"`
+		cases[`C:\My Exports\`] = `"C:\My Exports\\"`
 	} else {
 		cases["my exports"] = "'my exports'"
 		cases["it's"] = `'it'\''s'`
 		cases["$HOME"] = "'$HOME'"
+		cases[`exports\archive`] = `'exports\archive'`
 	}
 	for in, want := range cases {
 		if got := shellQuote(in); got != want {
