@@ -437,6 +437,8 @@ func TestShellQuote(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		cases[`C:\Backups\Optimole`] = `C:\Backups\Optimole`
+		cases["@exports"] = `"@exports"`
+		cases[`C:\%X%`] = `"C:\%X%"`
 		cases["my exports"] = `"my exports"`
 		cases[`C:\My Exports\`] = `"C:\My Exports\\"`
 	} else {
@@ -444,6 +446,9 @@ func TestShellQuote(t *testing.T) {
 		cases["it's"] = `'it'\''s'`
 		cases["$HOME"] = "'$HOME'"
 		cases[`exports\archive`] = `'exports\archive'`
+		cases["=sh"] = "'=sh'"
+		cases["@exports"] = "'@exports'"
+		cases["100%"] = "'100%'"
 	}
 	for in, want := range cases {
 		if got := shellQuote(in); got != want {

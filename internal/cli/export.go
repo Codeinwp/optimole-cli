@@ -262,18 +262,20 @@ func startExport(ctx context.Context, env Env, sess *session) (int64, bool, int)
 	return 0, false, exportError(env, sess, name, firstCancel(ctx, err))
 }
 
-// shellQuote writes a path for a command to paste: as is when it needs no
-// quotes, else in single quotes, or on Windows in double quotes (a path
-// cannot contain them), where a backslash run before the closing quote is
-// doubled so it does not escape the quote. A backslash needs quotes outside
-// Windows.
+// shellQuote writes a path for a command to paste: as is when it holds only
+// characters no shell treats specially, else in single quotes, or on Windows
+// in double quotes (a path cannot contain them), where a backslash run before
+// the closing quote is doubled so it does not escape the quote. A backslash
+// needs quotes outside Windows. No one Windows form suits both cmd.exe and
+// PowerShell: both still expand "%" or "$" inside double quotes, which a
+// folder name rarely holds.
 func shellQuote(s string) string {
 	windows := runtime.GOOS == "windows"
 	plain := s != "" && strings.IndexFunc(s, func(r rune) bool {
 		if r == '\\' {
 			return !windows
 		}
-		return !(r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r)) || strings.ContainsRune("._-/:+,@%=", r))
+		return !(r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r)) || strings.ContainsRune("._-/:+,", r))
 	}) < 0
 	switch {
 	case plain:
