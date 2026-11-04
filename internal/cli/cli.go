@@ -62,7 +62,7 @@ func DefaultEnv(build BuildInfo) Env {
 	}
 }
 
-const mainUsage = `optimole uploads local files into an Optimole media library.
+const mainUsage = `optimole uploads local files into an Optimole media library and exports it.
 
 Usage:
   optimole <command> [flags] [arguments]
@@ -70,6 +70,7 @@ Usage:
 Commands:
   upload     Upload files and directories into library folders
   folders    List the library's folders
+  export     Export the library as ZIP archives and download them
   login      Save an API key (read from stdin)
   logout     Delete the saved API key
   version    Print the version
@@ -89,6 +90,8 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return runUpload(ctx, rest, env)
 	case "folders":
 		return runFolders(ctx, rest, env)
+	case "export":
+		return runExport(ctx, rest, env)
 	case "login":
 		return runLogin(ctx, rest, env)
 	case "logout":
