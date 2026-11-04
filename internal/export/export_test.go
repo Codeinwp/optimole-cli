@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Codeinwp/optimole-cli/internal/api"
 	"github.com/Codeinwp/optimole-cli/internal/testserver"
@@ -429,8 +431,8 @@ func TestRunKeepsHostileDomainNamesInsideTheFolder(t *testing.T) {
 		seen[strings.ToLower(name)] = true
 	}
 	entries, _ := os.ReadDir(f.dir)
-	if len(entries) != len(domains)+1 { // + export.json
-		t.Errorf("%d entries in the export folder, want %d", len(entries), len(domains)+1)
+	if len(entries) != len(domains)+2 { // + export.json and the lock
+		t.Errorf("%d entries in the export folder, want %d", len(entries), len(domains)+2)
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(f.dir), "evil")); !os.IsNotExist(err) {
 		t.Errorf("wrote outside the export folder: %v", err)
@@ -456,8 +458,14 @@ func TestFolderNames(t *testing.T) {
 			t.Errorf("%q -> %q, want %q", d, m.names[d], name)
 		}
 	}
-	if got := m.names[strings.Repeat("a", 300)]; len(got) != maxFolderRunes {
-		t.Errorf("long name kept %d characters", len(got))
+	if got := m.names[strings.Repeat("a", 300)]; len(got) != maxFolderBytes {
+		t.Errorf("long name kept %d bytes", len(got))
+	}
+	// The cap counts bytes: 50 three-byte runes would be 150.
+	wide := strings.Repeat("界", 50) + ".com"
+	m.add([]string{wide})
+	if got := m.names[wide]; len(got) > maxFolderBytes || !utf8.ValidString(got) || !strings.HasPrefix(got, "界界") {
+		t.Errorf("multibyte name -> %q (%d bytes)", got, len(got))
 	}
 	// Domains seen later never take an earlier domain's folder.
 	m.add([]string{"EXAMPLE.COM"})
@@ -621,4 +629,260 @@ func TestFetchNamesAStalledDownload(t *testing.T) {
 	if !errors.Is(err, errStalled) || n != 10 {
 		t.Fatalf("got %d bytes, %v", n, err)
 	}
+}
+
+// storedZip builds an uncompressed ZIP, so contents of the same length give
+// archives of the same size.
+func storedZip(t *testing.T, name, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store, Modified: time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.WriteString(w, content)
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestRunDetectsAResumeAcrossASameSizeRewrite(t *testing.T) {
+	f := newFixture(t)
+	old := storedZip(t, "a.jpg", strings.Repeat("o", 300))
+	rewritten := storedZip(t, "a.jpg", strings.Repeat("n", 300))
+	if len(old) != len(rewritten) {
+		t.Fatal("fixture archives differ in size")
+	}
+	id := f.srv.AddExport(api.ExportCompleted, testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{old}})
+	// The first download is cut inside the file data; the archive is then
+	// rewritten with the same size, so the resume joins two versions.
+	f.srv.Inject(testserver.RouteDownload, testserver.Response{CutAfter: 100})
+	var once sync.Once
+	f.srv.Hook = func(route testserver.Route, r *http.Request) {
+		if route == testserver.RouteDownload && r.Header.Get("Range") != "" {
+			once.Do(func() { f.srv.RewriteArchive(id, "example.com", 1, rewritten) })
+		}
+	}
+	out := f.run(context.Background(), id)
+	if out.Err != nil || out.Downloaded != 1 {
+		t.Fatalf("outcome: %+v", out)
+	}
+	if !bytes.Equal(f.file("example.com/images-1.zip"), rewritten) {
+		t.Error("kept a mix of two versions")
+	}
+	var ranges []string
+	for _, d := range f.downloads() {
+		ranges = append(ranges, d.Range)
+	}
+	if strings.Join(ranges, "|") != "|bytes=100-|" {
+		t.Errorf("ranges %q: want a resume, then a fresh download", ranges)
+	}
+}
+
+func TestDownloadRefusesAnArchiveOfUnknownSize(t *testing.T) {
+	requests := 0
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush() // chunked: no Content-Length
+		w.Write(bytes.Repeat([]byte("x"), 1<<16))
+	}))
+	defer storage.Close()
+	f := newFixture(t)
+	path := filepath.Join(f.dir, "example.com", "images-1.zip")
+	res := f.newRunner().download(context.Background(), job{path: path, url: storage.URL + "/x", size: -1})
+	if !errors.Is(res.err, errUnknownSize) || requests != 1 || res.written != 0 {
+		t.Fatalf("got %+v after %d requests", res, requests)
+	}
+}
+
+func TestRunCancelsDownloadsWhenTheExportCannotBeRead(t *testing.T) {
+	f := newFixture(t)
+	f.srv.SetExportDomains(testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{zipOf(t, "a"), zipOf(t, "b")}})
+	exp, _ := f.client.CreateExport(context.Background())
+	// The first download stalls (for good: the stall timeout is minutes);
+	// meanwhile the export stays running and every look at it fails.
+	f.srv.Inject(testserver.RouteDownload, testserver.Response{StallAfter: 20})
+	var once sync.Once
+	gets := 0
+	f.srv.Hook = func(route testserver.Route, _ *http.Request) {
+		if route == testserver.RouteExportGet {
+			// The second look listed the first archive; the export stays
+			// running from the third on.
+			f.mu.Lock()
+			if gets++; gets == 3 {
+				f.srv.PauseExports(true)
+			}
+			f.mu.Unlock()
+		}
+		if route == testserver.RouteDownload {
+			once.Do(func() {
+				var errs []testserver.Response
+				for i := 0; i < 20; i++ {
+					errs = append(errs, testserver.Response{Status: http.StatusInternalServerError, Body: `{"message":"Server Error"}`})
+				}
+				f.srv.Inject(testserver.RouteExportGet, errs...)
+			})
+		}
+	}
+	done := make(chan Outcome, 1)
+	go func() { done <- f.run(context.Background(), exp.ID) }()
+	select {
+	case out := <-done:
+		var apiErr *api.Error
+		if !errors.As(out.Err, &apiErr) || apiErr.StatusCode != http.StatusInternalServerError || out.Failed != 0 {
+			t.Fatalf("outcome: %+v", out)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run waited for the stalled download")
+	}
+	parts, _ := filepath.Glob(filepath.Join(f.dir, "example.com", "*"+partSuffix))
+	if len(parts) != 1 {
+		t.Errorf("partial files: %v", parts)
+	}
+}
+
+func TestRunResumesDownloadsCancelledMidway(t *testing.T) {
+	f := newFixture(t)
+	a, b := zipOf(t, "a"), zipOf(t, "b")
+	id := f.srv.AddExport(api.ExportCompleted, testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{a, b}})
+	f.srv.Inject(testserver.RouteDownload, testserver.Response{StallAfter: 30}, testserver.Response{StallAfter: 40})
+	ctx, cancel := context.WithCancel(context.Background())
+	stalled := 0
+	f.srv.Hook = func(route testserver.Route, _ *http.Request) {
+		if route == testserver.RouteDownload {
+			f.mu.Lock()
+			stalled++
+			if stalled == 2 {
+				time.AfterFunc(100*time.Millisecond, cancel)
+			}
+			f.mu.Unlock()
+		}
+	}
+	out := f.run(ctx, id)
+	if !errors.Is(out.Err, context.Canceled) || out.Failed != 0 || out.Downloaded != 0 {
+		t.Fatalf("cancelled run: %+v", out)
+	}
+	parts, _ := filepath.Glob(filepath.Join(f.dir, "example.com", "*"+partSuffix))
+	if len(parts) != 2 {
+		t.Fatalf("partial files: %v", parts)
+	}
+
+	f.srv.Hook = nil
+	before := len(f.downloads())
+	out = f.run(context.Background(), id)
+	if out.Err != nil || out.Downloaded != 2 {
+		t.Fatalf("resumed run: %+v", out)
+	}
+	if !bytes.Equal(f.file("example.com/images-1.zip"), a) || !bytes.Equal(f.file("example.com/images-2.zip"), b) {
+		t.Error("resumed archives differ")
+	}
+	for _, d := range f.downloads()[before:] {
+		if d.Range != "bytes=30-" && d.Range != "bytes=40-" {
+			t.Errorf("resume without the right range: %+v", d)
+		}
+	}
+}
+
+func TestRunLimitsParallelDownloads(t *testing.T) {
+	f := newFixture(t)
+	var archives [][]byte
+	for i := 0; i < 7; i++ {
+		archives = append(archives, zipOf(t, fmt.Sprintf("f%d", i)))
+	}
+	id := f.srv.AddExport(api.ExportCompleted, testserver.ExportDomain{Domain: "example.com", Archives: archives})
+	f.srv.DownloadDelay = 30 * time.Millisecond
+	out := Run(context.Background(), Options{Client: f.client, ExportID: id, Dir: f.dir, Concurrency: 3, Sleep: immediate})
+	if out.Err != nil || out.Downloaded != 7 {
+		t.Fatalf("outcome: %+v", out)
+	}
+	if n := f.srv.MaxConcurrentDownloads(); n != 3 {
+		t.Errorf("at most %d downloads at once, want 3", n)
+	}
+}
+
+func TestRunRefusesAFolderAnotherRunHolds(t *testing.T) {
+	f := newFixture(t)
+	id := f.srv.AddExport(api.ExportCompleted, testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{zipOf(t, "a")}})
+	unlock, err := lockDir(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	out := f.run(context.Background(), id)
+	if !errors.Is(out.Err, errLocked) || len(f.downloads()) != 0 {
+		t.Fatalf("outcome %+v after %d downloads", out, len(f.downloads()))
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, ManifestName)); !os.IsNotExist(err) {
+		t.Errorf("wrote the manifest of a folder another run holds: %v", err)
+	}
+	unlock()
+	if out := f.run(context.Background(), id); out.Err != nil || out.Downloaded != 1 {
+		t.Errorf("after the lock was released: %+v", out)
+	}
+}
+
+func TestRunManifestKeepsArchivesOfUnselectedDomains(t *testing.T) {
+	f := newFixture(t)
+	id := f.srv.AddExport(api.ExportCompleted,
+		testserver.ExportDomain{Domain: "a.com", Archives: [][]byte{zipOf(t, "a")}},
+		testserver.ExportDomain{Domain: "b.com", Archives: [][]byte{zipOf(t, "b")}},
+	)
+	f.run(context.Background(), id)
+	f.run(context.Background(), id, "a.com")
+	var m manifest
+	if err := json.Unmarshal(f.file(ManifestName), &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range m.Domains {
+		if !d.Archives[0].Downloaded {
+			t.Errorf("%s marked not downloaded after a filtered rerun", d.Domain)
+		}
+	}
+}
+
+func TestRunRefusesLinksInTheExportFolder(t *testing.T) {
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim.txt")
+	link := func(t *testing.T, target, name string) {
+		t.Helper()
+		if err := os.Symlink(target, name); err != nil {
+			t.Skipf("cannot create symlinks here: %v", err)
+		}
+	}
+	data := zipOf(t, "a.jpg")
+	t.Run("domain folder", func(t *testing.T) {
+		f := newFixture(t)
+		id := f.srv.AddExport(api.ExportCompleted, testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{data}})
+		os.MkdirAll(f.dir, 0o755)
+		link(t, outside, filepath.Join(f.dir, "example.com"))
+		out := f.run(context.Background(), id)
+		if out.Failed != 1 {
+			t.Fatalf("outcome: %+v", out)
+		}
+		if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+			t.Errorf("wrote through the link: %v", entries)
+		}
+	})
+	t.Run("partial file and manifest", func(t *testing.T) {
+		os.WriteFile(victim, []byte("keep me"), 0o644)
+		f := newFixture(t)
+		id := f.srv.AddExport(api.ExportCompleted, testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{data}})
+		final := filepath.Join(f.dir, "example.com", "images-1.zip")
+		os.MkdirAll(filepath.Dir(final), 0o755)
+		link(t, victim, tempPath(job{path: final, size: int64(len(data))}))
+		link(t, victim, filepath.Join(f.dir, ManifestName+partSuffix))
+		out := f.run(context.Background(), id)
+		if out.Err != nil || out.Downloaded != 1 {
+			t.Fatalf("outcome: %+v", out)
+		}
+		if got, _ := os.ReadFile(victim); string(got) != "keep me" {
+			t.Errorf("the link's target was written: %q", got)
+		}
+		if !bytes.Equal(f.file("example.com/images-1.zip"), data) {
+			t.Error("archive differs")
+		}
+	})
 }

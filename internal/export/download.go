@@ -35,6 +35,10 @@ var errNeedURL = errors.New("the download URL was refused or the archive changed
 // errStalled is an attempt aborted because no bytes arrived for stallTimeout.
 var errStalled = errors.New("the download stalled")
 
+// errUnknownSize is an archive whose size neither the export nor storage
+// gave: without one, a download has no bound.
+var errUnknownSize = errors.New("neither the export nor storage gave the archive's size")
+
 // writeError is a failure writing to the local disk; retrying will not help.
 type writeError struct{ err error }
 
@@ -60,23 +64,25 @@ type jobResult struct {
 	err  error
 }
 
-// onDisk reports whether the archive is already in place: a file of the
-// listed size (only checked archives are renamed into place).
+// onDisk reports whether the archive is already in place: a plain file of
+// the listed size (only checked archives are renamed into place).
 func onDisk(j job) bool {
 	if j.size < 0 {
 		return false
 	}
-	st, err := os.Stat(j.path)
+	st, err := os.Lstat(j.path)
 	return err == nil && st.Mode().IsRegular() && st.Size() == j.size
 }
 
 // download puts one archive at j.path. The bytes go to a ".part" file named
 // after the expected size, so a later run resumes only an archive of the same
-// size; the file is renamed into place once its size matches and it opens as
-// a ZIP. A broken ZIP is downloaded once more from scratch.
+// size; the file is renamed into place once its size matches and every file
+// in it reads back with its checksum. That check also catches a resume that
+// joined two versions of the same size. A broken ZIP is downloaded once more
+// from scratch.
 func (r *runner) download(ctx context.Context, j job) jobResult {
-	if err := os.MkdirAll(filepath.Dir(j.path), 0o755); err != nil {
-		return jobResult{err: &writeError{err}}
+	if err := realDir(filepath.Dir(j.path)); err != nil {
+		return jobResult{err: err}
 	}
 	tmp := tempPath(j)
 	removeStaleTemps(j.path, tmp)
@@ -158,7 +164,10 @@ func (r *runner) fetch(ctx context.Context, j job, tmp string, res *jobResult) e
 // fetchOnce makes one GET and appends the body to tmp. It returns the bytes
 // written.
 func (r *runner) fetchOnce(ctx context.Context, j job, tmp string) (int64, error) {
-	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE, 0o644)
+	if err := clearLink(tmp); err != nil {
+		return 0, &writeError{err}
+	}
+	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|noFollow, 0o644)
 	if err != nil {
 		return 0, &writeError{err}
 	}
@@ -198,14 +207,14 @@ func (r *runner) fetchOnce(ctx context.Context, j job, tmp string) (int64, error
 	if want < 0 {
 		want = obj.Size
 	}
+	if want < 0 {
+		return 0, errUnknownSize
+	}
 
 	stall := time.AfterFunc(stallTimeout, cancel)
 	defer stall.Stop()
-	var src io.Reader = &stallReader{r: obj.Body, timer: stall}
-	if want >= 0 {
-		// One byte more than expected shows an archive that grew.
-		src = io.LimitReader(src, want-offset+1)
-	}
+	// One byte more than expected shows an archive that grew.
+	src := io.LimitReader(&stallReader{r: obj.Body, timer: stall}, want-offset+1)
 	w := &fileWriter{f: f}
 	n, err := io.Copy(w, src)
 	switch {
@@ -218,9 +227,9 @@ func (r *runner) fetchOnce(ctx context.Context, j job, tmp string) (int64, error
 	}
 	total := offset + n
 	switch {
-	case want >= 0 && total > want:
+	case total > want:
 		return n, fmt.Errorf("storage sent more than the listed %d bytes: %w", want, errNeedURL)
-	case want >= 0 && total < want:
+	case total < want:
 		return n, fmt.Errorf("%s: the archive ended after %d of %d bytes", api.OpDownloadArchive, total, want)
 	}
 	if err := f.Sync(); err != nil {
@@ -250,7 +259,7 @@ func classifyStorageError(err error, f *os.File) error {
 // retryable reports whether another attempt may succeed.
 func retryable(err error) bool {
 	var we *writeError
-	if errors.As(err, &we) || errors.Is(err, errNeedURL) {
+	if errors.As(err, &we) || errors.Is(err, errNeedURL) || errors.Is(err, errUnknownSize) {
 		return false
 	}
 	var se *api.StorageError
@@ -260,8 +269,9 @@ func retryable(err error) bool {
 	return true
 }
 
-// checkArchive checks the downloaded file's size and that it opens as a ZIP
-// (its central directory reads), and returns the size.
+// checkArchive checks the downloaded file's size and that it is a ZIP whose
+// every file reads back with its checksum, and returns the size. Files in a
+// compression format the reader lacks are not read.
 func checkArchive(path string, want int64) (int64, error) {
 	st, err := os.Stat(path)
 	if err != nil {
@@ -274,7 +284,20 @@ func checkArchive(path string, want int64) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("the downloaded archive is not a valid ZIP: %w", err)
 	}
-	zr.Close()
+	defer zr.Close()
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		if errors.Is(err, zip.ErrAlgorithm) {
+			continue
+		}
+		if err == nil {
+			_, err = io.Copy(io.Discard, rc)
+			rc.Close()
+		}
+		if err != nil {
+			return 0, fmt.Errorf("the downloaded archive is not a valid ZIP: %q: %w", f.Name, err)
+		}
+	}
 	return st.Size(), nil
 }
 

@@ -126,6 +126,8 @@ type Server struct {
 	CompleteDelay time.Duration
 	// PutDelay slows down storage uploads.
 	PutDelay time.Duration
+	// DownloadDelay slows down archive downloads.
+	DownloadDelay time.Duration
 	// UploadExpiresIn sets the expires_at of new upload URLs (default 15
 	// minutes; negative values give URLs that are already expired).
 	UploadExpiresIn time.Duration
@@ -154,6 +156,9 @@ type Server struct {
 	exportTemplate []ExportDomain
 	exportsPaused  bool
 	urlGeneration  int
+
+	inflightDownloads int
+	maxDownloads      int
 }
 
 // New starts a fake and closes it when the test ends. The test fails if a

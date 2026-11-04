@@ -99,7 +99,8 @@ type Outcome struct {
 	Bytes int64
 	// Err says why the run stopped before the export finished and every
 	// archive was tried: a failed look at the export, an *UnknownDomainError,
-	// the context, or the manifest that could not be written.
+	// another command downloading into Dir, the context, or the manifest that
+	// could not be written.
 	Err error
 }
 
@@ -160,6 +161,9 @@ type runner struct {
 	parts        map[partKey]*part
 	queue        []*part
 	bytes        int64
+	// unlock releases the lock on Dir, held from the first look at the
+	// export on.
+	unlock func()
 }
 
 // Run follows the export until it is final and every selected archive it
@@ -194,26 +198,29 @@ func Run(ctx context.Context, o Options) Outcome {
 			out.Present++
 		}
 	}
-	var unknown *UnknownDomainError
-	if r.exp != nil && !errors.As(out.Err, &unknown) {
+	if r.unlock != nil {
 		if err := writeManifest(o.Dir, r.exp, r.folders.names, r.parts); err != nil && out.Err == nil {
 			out.Err = err
 		}
+		r.unlock()
 	}
 	return out
 }
 
 // loop is the coordinator: it looks at the export, starts downloads and
 // handles their results, all on one goroutine.
-func (r *runner) loop(ctx context.Context) Outcome {
+func (r *runner) loop(parent context.Context) Outcome {
 	var out Outcome
+	ctx, cancel := context.WithCancel(parent)
 	started := time.Now()
 	results := make(chan finished)
 	pollDue := make(chan struct{}, 1)
 	pollNow, pollScheduled := true, false
 	running := 0
 	defer func() {
-		// Wait for the downloads in flight; the context ends them early.
+		// Stop the downloads in flight, which keep their partial files for
+		// the next run, and wait for them.
+		cancel()
 		for ; running > 0; running-- {
 			r.finish(ctx, <-results)
 		}
@@ -225,6 +232,9 @@ func (r *runner) loop(ctx context.Context) Outcome {
 			exp, err := r.client.GetExport(ctx, r.opts.ExportID)
 			if err == nil {
 				err = r.apply(exp)
+			}
+			if err == nil && r.unlock == nil {
+				r.unlock, err = lockDir(r.opts.Dir)
 			}
 			if err != nil {
 				if ctx.Err() != nil {

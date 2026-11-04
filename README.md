@@ -295,9 +295,13 @@ downloaded. It holds no download URLs. The archives are not unpacked.
 - While the export runs, the CLI checks it every 5 seconds (less often after a few minutes) and downloads each
   archive as soon as the server lists it.
 - An archive is written to `images-N.zip.<size>.part` and renamed into place only when its size matches what
-  the server listed and it opens as a ZIP. A download that gets cut is resumed where it stopped; one that
-  stalls for 2 minutes is restarted. An archive that is not a valid ZIP is downloaded once more, then reported
-  as failed.
+  the server listed and every file in it reads back with its checksum. A download that gets cut is resumed
+  where it stopped; one that stalls for 2 minutes is restarted. An archive that fails the check (a resume that
+  joined two versions of a rewritten archive, for example) is downloaded once more from scratch, then reported
+  as failed. An archive whose size neither the server nor storage gives is not downloaded.
+- One command at a time downloads into an export folder: it holds a lock on `.optimole-export.lock`, and a
+  second command into the same folder stops with an error. Links planted inside the export folder are not
+  followed.
 - Running `download` again skips the archives already in place and resumes the partial ones. If the server
   listed an archive with a new size (it rewrote it), that archive is downloaded again.
 - Download URLs are valid for a day; when storage refuses one, the CLI asks the server for a fresh one.
@@ -309,9 +313,9 @@ downloaded. It holds no download URLs. The archives are not unpacked.
 
 ```text
 Started export 42.
-Export 42: running
   example.com: running
   directUpload: running
+Export 42: running
 downloading optimole-export-42/example.com/images-1.zip (1.0 GB)
 downloaded  optimole-export-42/example.com/images-1.zip (1.0 GB in 41s)
   directUpload: completed, no files
@@ -325,15 +329,16 @@ With `--json`:
 
 ```json
 {"event":"started","id":42,"created":true}
-{"event":"export","id":42,"status":"running"}
 {"event":"domain","domain":"example.com","status":"running","archives":0}
+{"event":"export","id":42,"status":"running"}
 {"event":"downloading","domain":"example.com","part":1,"path":"optimole-export-42/example.com/images-1.zip","size":1073741824}
 {"event":"archive","domain":"example.com","part":1,"path":"optimole-export-42/example.com/images-1.zip","status":"downloaded","size":1073741824,"seconds":41}
 {"summary":{"id":42,"status":"completed","dir":"optimole-export-42","downloaded":2,"present":0,"failed":0,"bytes":1932735283,"failed_domains":[],"interrupted":false,"timed_out":false}}
 ```
 
-An archive's `status` is `downloaded`, `present` (already on disk) or `failed` (with `error`). `created` is
-`false` when the command follows an export that was already running.
+Each look at the export reports its domains first, then the export's own status. An archive's `status` is
+`downloaded`, `present` (already on disk) or `failed` (with `error`). `created` is `false` when the command
+follows an export that was already running.
 
 An export is `queued`, `running`, `completed`, `failed` or `cancelled`. Once every domain has finished, it is
 `failed` if one of them failed; the other domains' archives are still downloaded, and the command exits 1. An account keeps at most 5
@@ -356,7 +361,7 @@ Prints the version, commit and build date.
 
 | Code | Meaning |
 |---|---|
-| 0 | Every selected file was uploaded (skipped files do not count). For `export start` and `export download`: the export completed and every selected archive is on disk. |
+| 0 | Every selected file was uploaded (skipped files do not count). For `export start` and `export download`: the export completed and every selected archive is on disk (`export start --no-wait`: the export was started, or one was already running). |
 | 1 | At least one file failed, there was nothing to upload, or the output could not be written. For exports: the export failed or was cancelled, an archive failed, `--timeout` passed, or the account keeps the most exports it may. |
 | 2 | Usage or configuration error (bad flags, a directory without `-r`, an unknown `--domain`, missing key, non-https URL). Nothing was uploaded or downloaded. |
 | 130 | Interrupted with Ctrl-C. |

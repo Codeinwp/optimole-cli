@@ -5,10 +5,12 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
-// maxFolderRunes keeps folder names well inside path length limits.
-const maxFolderRunes = 100
+// maxFolderBytes keeps folder names, suffix included, well inside the 255
+// bytes (or UTF-16 units) a path component may have.
+const maxFolderBytes = 100
 
 // windowsReserved are device names Windows refuses as a file name, with or
 // without an extension.
@@ -51,21 +53,18 @@ func (m *folderMap) add(domains []string) {
 
 // safeSegment turns a domain name into a file name that is valid and inert on
 // every platform: letters, digits, ".", "-" and "_" only (anything else
-// becomes "_"), at most maxFolderRunes long, no leading or trailing dot, and
+// becomes "_"), at most maxFolderBytes long, no leading or trailing dot, and
 // no Windows device name.
 func safeSegment(domain string) string {
 	var b strings.Builder
-	n := 0
 	for _, r := range domain {
-		if n == maxFolderRunes {
+		if !(r == '.' || r == '-' || r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			r = '_'
+		}
+		if b.Len()+utf8.RuneLen(r) > maxFolderBytes {
 			break
 		}
-		if r == '.' || r == '-' || r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('_')
-		}
-		n++
+		b.WriteRune(r)
 	}
 	name := strings.Trim(b.String(), ".")
 	if name == "" {

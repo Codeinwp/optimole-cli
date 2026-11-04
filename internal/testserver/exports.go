@@ -102,6 +102,14 @@ func (s *Server) ExpireArchiveURLs() {
 	s.urlGeneration++
 }
 
+// MaxConcurrentDownloads is the highest number of archive downloads seen at
+// once.
+func (s *Server) MaxConcurrentDownloads() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxDownloads
+}
+
 // ExportIDs lists the stored exports, oldest first.
 func (s *Server) ExportIDs() []int64 {
 	s.mu.Lock()
@@ -397,6 +405,18 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	status := 0
 	var drop func()
 	defer func() { s.finishThenDrop(ev, status, drop) }()
+	s.mu.Lock()
+	s.inflightDownloads++
+	s.maxDownloads = max(s.maxDownloads, s.inflightDownloads)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.inflightDownloads--
+		s.mu.Unlock()
+	}()
+	if s.DownloadDelay > 0 {
+		time.Sleep(s.DownloadDelay)
+	}
 	if r.Header.Get("Authorization") != "" {
 		s.violate("archive download carried an Authorization header")
 	}

@@ -239,7 +239,7 @@ func startExport(ctx context.Context, env Env, sess *session) (int64, bool, int)
 		// since).
 		exports, listErr := listAllExports(ctx, sess.client)
 		if listErr != nil {
-			return 0, false, exportError(env, sess, name, err)
+			return 0, false, exportError(env, sess, name, firstCancel(ctx, err))
 		}
 		if apiErr.Code != api.CodeExportLimitReached && len(exports) > 0 && (!api.IsFinalStatus(exports[0].Status) || len(exports) < exportLimit) {
 			return exports[0].ID, false, ExitOK
@@ -256,7 +256,16 @@ func startExport(ctx context.Context, env Env, sess *session) (int64, bool, int)
 			return exports[0].ID, false, ExitOK
 		}
 	}
-	return 0, false, exportError(env, sess, name, err)
+	return 0, false, exportError(env, sess, name, firstCancel(ctx, err))
+}
+
+// firstCancel returns the context's error when it ended (so Ctrl-C during
+// a fallback lookup still exits 130), else err.
+func firstCancel(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 func printLimitHint(env Env, exports []api.Export) {

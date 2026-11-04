@@ -2,7 +2,9 @@ package export
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -38,8 +40,8 @@ type manifestArchive struct {
 	Downloaded bool `json:"downloaded"`
 }
 
-// writeManifest writes ManifestName into dir from the export's last answer,
-// replacing an earlier one in one step.
+// writeManifest writes ManifestName into dir (locked by this run) from the
+// export's last answer, replacing an earlier one in one step.
 func writeManifest(dir string, exp *api.Export, folders map[string]string, parts map[partKey]*part) error {
 	m := manifest{ID: exp.ID, Status: exp.Status, CreatedAt: exp.CreatedAt, Domains: []manifestDomain{}}
 	for _, d := range exp.Domains {
@@ -56,8 +58,12 @@ func writeManifest(dir string, exp *api.Export, folders map[string]string, parts
 			if lp.Size.Valid {
 				ma.Size = lp.Size.Value
 			}
-			if p := parts[partKey{d.Domain, lp.Number.Value}]; p != nil && p.state == done && (ma.Size < 0 || ma.Size == p.doneSize) {
-				ma.Downloaded = true
+			if p := parts[partKey{d.Domain, lp.Number.Value}]; p != nil {
+				ma.Downloaded = p.state == done && (ma.Size < 0 || ma.Size == p.doneSize)
+			} else {
+				// A domain this run did not select: an earlier run may have
+				// put the archive in place.
+				ma.Downloaded = onDisk(job{path: filepath.Join(dir, md.Folder, filepath.Base(ma.File)), size: ma.Size})
 			}
 			md.Archives = append(md.Archives, ma)
 		}
@@ -67,12 +73,20 @@ func writeManifest(dir string, exp *api.Export, folders map[string]string, parts
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("writing %s: %w", ManifestName, err)
-	}
 	path := filepath.Join(dir, ManifestName)
 	tmp := path + partSuffix
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+	// A fresh file (O_EXCL), never one a link planted there points to.
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("writing %s: %w", ManifestName, err)
+	}
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err == nil {
+		_, err = f.Write(append(data, '\n'))
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("writing %s: %w", ManifestName, err)
 	}

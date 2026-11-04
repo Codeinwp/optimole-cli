@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -380,5 +382,49 @@ func TestExportMissingExport(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), "No such export: finished exports are deleted 10 days after they finish") {
 		t.Errorf("stderr: %s", h.stderr.String())
+	}
+}
+
+func TestExportStartInterruptedDuringTheConflictLookup(t *testing.T) {
+	for _, lostAnswer := range []bool{false, true} {
+		h := newHarness(t).withKey()
+		h.srv.LegacyExportConflicts = true
+		h.srv.AddExport("running")
+		if lostAnswer {
+			h.srv.Inject(testserver.RouteExportCreate, testserver.Response{CommitThenClose: true})
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		h.srv.Hook = func(route testserver.Route, _ *http.Request) {
+			if route == testserver.RouteExportList {
+				cancel()
+			}
+		}
+		if code := h.runCtx(ctx, "export", "start"); code != ExitInterrupted {
+			t.Errorf("lostAnswer=%v: exit %d, stderr %s", lostAnswer, code, h.stderr.String())
+		}
+	}
+}
+
+func TestExportListFollowsCursors(t *testing.T) {
+	h := newHarness(t).withKey()
+	for i := 0; i < exportsPerPage+3; i++ {
+		h.srv.AddExport("completed")
+	}
+	if code := h.run("export", "list", "--json"); code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if n := len(h.jsonLines()); n != exportsPerPage+3 || h.srv.Count(testserver.RouteExportList) != 2 {
+		t.Errorf("%d exports in %d pages", n, h.srv.Count(testserver.RouteExportList))
+	}
+
+	// A server that hands out the same cursor again is not followed forever.
+	g := newHarness(t).withKey()
+	page := `{"data":[{"id":%d,"status":"completed","created_at":"2026-11-04T10:00:00.000000Z","domains":[]}],"meta":{"next_cursor":"same","has_more":true}}`
+	g.srv.Inject(testserver.RouteExportList, testserver.Response{Status: 200, Body: fmt.Sprintf(page, 2)}, testserver.Response{Status: 200, Body: fmt.Sprintf(page, 1)})
+	if code := g.run("export", "list", "--json"); code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if n := len(g.jsonLines()); n != 2 || g.srv.Count(testserver.RouteExportList) != 2 {
+		t.Errorf("%d exports in %d pages", n, g.srv.Count(testserver.RouteExportList))
 	}
 }
