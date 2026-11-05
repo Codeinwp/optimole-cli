@@ -191,6 +191,9 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	fs := newFlagSet("url", urlUsage, env)
 	var common commonFlags
 	common.register(fs, true)
+	// The flag package echoes a bad value; hide the keys known before the
+	// flags are read (environment and saved key) in what it prints.
+	fs.SetOutput(redactingWriter{w: env.Stderr, redact: common.resolve(env).redact})
 	var f urlFlags
 	var jsonOut bool
 	concurrency := urlDefaultConcurrency
@@ -247,6 +250,19 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	env.Stderr = &lockedWriter{w: env.Stderr}
 	run := &urlRun{env: env, common: &common, edits: edits, redact: red}
 	return run.run(ctx, inputs, concurrency, jsonOut)
+}
+
+// redactingWriter hides secrets in what it passes on.
+type redactingWriter struct {
+	w      io.Writer
+	redact redact.Redactor
+}
+
+func (r redactingWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(r.w, r.redact.String(string(p))); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // lockedWriter serializes writes from several goroutines.

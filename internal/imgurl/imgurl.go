@@ -53,7 +53,8 @@ type URL struct {
 	options []Option
 	// extra are the other segments before the source: "files" marks a file
 	// URL, and the CDN ignores the rest. Before an origin URL the CDN removes
-	// them, so Parse drops them there, "files" aside.
+	// them, so Parse drops them there, but for "files" and any segment that
+	// holds "ig:avif", which turns AVIF off wherever it is in the path.
 	extra []string
 	// source is the rest of the path, from "id:" or the origin's scheme.
 	source string
@@ -102,7 +103,7 @@ func Parse(raw string) (*URL, error) {
 			u.options = append(u.options, Option{name, value})
 			continue
 		}
-		if u.ID() != "" || seg == "files" {
+		if u.ID() != "" || seg == "files" || strings.Contains(seg, "ig:avif") {
 			u.extra = append(u.extra, seg)
 		}
 	}
@@ -161,25 +162,33 @@ func (u *URL) ID() string {
 	return id
 }
 
-// Validate reports a URL the CDN would misread because of a segment of the
-// origin's own path:
-//   - The CDN looks for options in the whole path, so a segment such as "w:9"
-//     counts as an option unless the URL already sets that option before the
+// Validate reports a URL the CDN would misread because of the origin's own
+// path:
+//   - The CDN deletes the first "/ig:avif" and the first "/f:avif" in the
+//     path, as text, so a match inside the origin path changes it.
+//   - "ig:avif" anywhere in the path turns AVIF off, so one in the origin
+//     path alone does.
+//   - The CDN looks for options in every segment, so a segment such as
+//     "w:9" counts as an option unless the URL sets that option before the
 //     source.
-//   - It deletes the first "/ig:avif" and the first "/f:avif" in the path, so
-//     one in the origin path is deleted unless the URL's options hold it.
 func (u *URL) Validate() error {
+	head := u.head()
+	path := head + "/" + u.source
+	for _, cut := range []string{"/ig:avif", "/f:avif"} {
+		if i := strings.Index(path, cut); i >= len(head) {
+			return fmt.Errorf("the origin path holds %q, which the CDN deletes, so it would misread this URL", cut)
+		}
+	}
+	if strings.Contains(u.source, "ig:avif") && !strings.Contains(head, "ig:avif") {
+		return errors.New(`the origin path holds "ig:avif", which turns AVIF off on the CDN, so it would misread this URL`)
+	}
 	segs := strings.Split(u.source, "/")
 	for _, seg := range segs[1:] {
-		name, value, ok := strings.Cut(seg, ":")
+		name, _, ok := strings.Cut(seg, ":")
 		var misread bool
 		switch {
-		case !ok:
-		case seg == "ig:avif" || seg == "f:avif":
-			v, _ := u.Get(name)
-			misread = v != value
-		case name == "ig":
-			// The CDN reads no other "ig" value.
+		case !ok, name == "ig":
+			// The CDN reads no "ig" option; "ig:avif" is checked above.
 		case name == "id":
 			misread = u.ID() == ""
 		case IsOption(name):
@@ -258,8 +267,13 @@ func (u *URL) Options() []Option {
 // String returns the URL with its options in the CDN's order, followed by
 // the other segments and the source.
 func (u *URL) String() string {
+	return u.prefix + u.head() + "/" + u.source + u.suffix
+}
+
+// head returns the path before the source: the options, then the other
+// segments, each after a slash.
+func (u *URL) head() string {
 	var b strings.Builder
-	b.WriteString(u.prefix)
 	for _, o := range u.Options() {
 		b.WriteByte('/')
 		b.WriteString(o.String())
@@ -268,8 +282,5 @@ func (u *URL) String() string {
 		b.WriteByte('/')
 		b.WriteString(e)
 	}
-	b.WriteByte('/')
-	b.WriteString(u.source)
-	b.WriteString(u.suffix)
 	return b.String()
 }

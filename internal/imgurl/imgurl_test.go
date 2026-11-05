@@ -236,6 +236,11 @@ func TestValidateFindsOptionsTheCDNReadsInTheOriginPath(t *testing.T) {
 		{"https://mlabc.i.optimole.com/w:300/ig:avif/https://example.com/uploads/ig:avif/a.jpg", false},
 		{"https://mlabc.i.optimole.com/f:best/https://example.com/f:avif/a.jpg", true},
 		{"https://mlabc.i.optimole.com/f:avif/https://example.com/f:avif/a.jpg", false},
+		// The deletions match text, not whole segments.
+		{"https://mlabc.i.optimole.com/w:300/https://example.com/uploads/ig:aviffoo/a.jpg", true},
+		{"https://mlabc.i.optimole.com/f:best/https://example.com/uploads/f:aviffoo/a.jpg", true},
+		{"https://mlabc.i.optimole.com/ig:aviffoo/https://example.com/uploads/ig:avif/a.jpg", false},
+		{"https://mlabc.i.optimole.com/w:300/https://example.com/uploads/xig:avif/a.jpg", true},
 		{libImage, false},
 	}
 	for _, tt := range tests {
@@ -243,6 +248,10 @@ func TestValidateFindsOptionsTheCDNReadsInTheOriginPath(t *testing.T) {
 		if (err != nil) != tt.bad {
 			t.Errorf("Validate(%q) = %v, want an error: %v", tt.raw, err, tt.bad)
 		}
+	}
+	// A segment that turns AVIF off is kept, even before an origin URL.
+	if got := mustParse(t, "https://cdn.example.com/w:300/xig:avif/https://example.com/a.jpg").String(); got != "https://cdn.example.com/w:300/xig:avif/https://example.com/a.jpg" {
+		t.Fatalf("String() = %q", got)
 	}
 	// A custom-domain URL left without options still parses back.
 	c := mustParse(t, "https://cdn.example.com/w:640/extra/https://example.com/a.jpg")

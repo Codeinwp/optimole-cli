@@ -458,6 +458,15 @@ func TestURLRedactsKeysInEveryMessage(t *testing.T) {
 	if strings.Contains(h.stderr.String(), secret) || !strings.Contains(h.stderr.String(), "[REDACTED]") {
 		t.Fatalf("usage error: %s", h.stderr.String())
 	}
+	// In the flag package's own errors.
+	for _, args := range [][]string{{"url", urlImage, "-c", secret}, {"url", urlImage, "--json=" + secret}} {
+		if code := h.run(args...); code != ExitUsage {
+			t.Fatalf("%v: exit %d, want 2", args[2:], code)
+		}
+		if strings.Contains(h.stderr.String(), secret) || !strings.Contains(h.stderr.String(), "[REDACTED]") {
+			t.Fatalf("%v: %s", args[2:], h.stderr.String())
+		}
+	}
 	// In an error's own text, in both output modes.
 	withCredentials := "https://" + secret + "@mlabc.i.optimole.com/id:" + urlHash + "/a.jpg"
 	for _, args := range [][]string{{"url", withCredentials}, {"url", withCredentials, "--json"}} {
