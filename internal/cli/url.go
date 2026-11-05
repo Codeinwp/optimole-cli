@@ -254,23 +254,27 @@ func runURL(ctx context.Context, args []string, env Env) int {
 // (`invalid value "x" for flag -c`, `invalid boolean value "x" for -json`),
 // a whole argument (`bad flag syntax: ---x`) and a flag name
 // (`flag provided but not defined: -x`).
+// The arguments, which can span lines, run to the end of the message.
 var (
 	flagValue   = regexp.MustCompile(`(invalid (?:boolean )?value) "(?:[^"\\]|\\.)*"`)
-	flagSyntax  = regexp.MustCompile(`(bad flag syntax): .*`)
-	flagUnknown = regexp.MustCompile(`(flag provided but not defined: -)(\S+)`)
+	flagSyntax  = regexp.MustCompile(`(?s)(bad flag syntax): .*`)
+	flagUnknown = regexp.MustCompile(`(?s)flag provided but not defined: -(.*)`)
+	// flagName is what a mistyped flag looks like; anything else (a value
+	// pasted with it, a key) is not repeated.
+	flagName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]{0,18}$`)
 )
 
 // flagErrorWriter drops from the flag package's errors the values and
-// arguments typed, and a flag name that looks like an API key: one could be
-// a key given by mistake, from any source.
+// arguments typed, keeping only a plain mistyped flag name: what was typed
+// could be an API key given by mistake, from any source.
 type flagErrorWriter struct{ w io.Writer }
 
 func (f flagErrorWriter) Write(p []byte) (int, error) {
 	s := flagValue.ReplaceAllString(string(p), "$1")
-	s = flagSyntax.ReplaceAllString(s, "$1")
+	s = flagSyntax.ReplaceAllString(s, "$1\n")
 	s = flagUnknown.ReplaceAllStringFunc(s, func(m string) string {
-		if name := flagUnknown.FindStringSubmatch(m)[2]; keyLike.MatchString(name) {
-			return "flag provided but not defined (it looks like an API key, so it is not shown)"
+		if name := strings.TrimSuffix(flagUnknown.FindStringSubmatch(m)[1], "\n"); !flagName.MatchString(name) {
+			return "flag provided but not defined (what was typed is not shown)\n"
 		}
 		return m
 	})

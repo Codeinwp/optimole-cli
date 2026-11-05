@@ -471,7 +471,9 @@ func TestURLRedactsKeysInEveryMessage(t *testing.T) {
 		{[]string{"--width", "--", "--api-key", other, "-c", other}, "invalid value for flag -c"},
 		{[]string{"--api-key", other, "-c", secret, "--api-key", "x"}, "invalid value for flag -c"},
 		{[]string{"---api-key=" + secret}, "bad flag syntax"},
-		{[]string{"--optml-s" + strings.Repeat("Ab3", 19)}, "it looks like an API key"},
+		{[]string{"--optml-s" + strings.Repeat("Ab3", 19)}, "what was typed is not shown"},
+		{[]string{"---api-key=\n" + secret}, "bad flag syntax\n"},
+		{[]string{"--api-key " + secret}, "what was typed is not shown"},
 		{[]string{"--widht", "300"}, "flag provided but not defined: -widht"},
 	} {
 		if code := h.run(append([]string{"url", urlImage}, tt.args...)...); code != ExitUsage {

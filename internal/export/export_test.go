@@ -361,7 +361,13 @@ func TestRunRestartsAStalledDownload(t *testing.T) {
 	if out.Err != nil || out.Downloaded != 1 {
 		t.Fatalf("outcome: %+v", out)
 	}
-	if d := f.downloads(); len(d) != 2 || d[1].Range != "bytes=60-" {
+	// The stalled request is recorded once its handler sees the cancel,
+	// which can be after the run returns.
+	d := f.downloads()
+	for deadline := time.Now().Add(2 * time.Second); len(d) < 2 && time.Now().Before(deadline); d = f.downloads() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(d) != 2 || d[1].Range != "bytes=60-" {
 		t.Errorf("downloads: %+v", d)
 	}
 }
