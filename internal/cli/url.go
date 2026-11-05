@@ -250,16 +250,31 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	return run.run(ctx, inputs, concurrency, jsonOut)
 }
 
-// flagValue matches the value the flag package quotes in its errors:
-// `invalid value "x" for flag -c`, `invalid boolean value "x" for -json`.
-var flagValue = regexp.MustCompile(`(invalid (?:boolean )?value) "(?:[^"\\]|\\.)*"`)
+// The flag package's errors that repeat what was typed: a value
+// (`invalid value "x" for flag -c`, `invalid boolean value "x" for -json`),
+// a whole argument (`bad flag syntax: ---x`) and a flag name
+// (`flag provided but not defined: -x`).
+var (
+	flagValue   = regexp.MustCompile(`(invalid (?:boolean )?value) "(?:[^"\\]|\\.)*"`)
+	flagSyntax  = regexp.MustCompile(`(bad flag syntax): .*`)
+	flagUnknown = regexp.MustCompile(`(flag provided but not defined: -)(\S+)`)
+)
 
-// flagErrorWriter drops the values the flag package quotes in its errors:
-// one could be an API key given by mistake, from any source.
+// flagErrorWriter drops from the flag package's errors the values and
+// arguments typed, and a flag name that looks like an API key: one could be
+// a key given by mistake, from any source.
 type flagErrorWriter struct{ w io.Writer }
 
 func (f flagErrorWriter) Write(p []byte) (int, error) {
-	if _, err := io.WriteString(f.w, flagValue.ReplaceAllString(string(p), "$1")); err != nil {
+	s := flagValue.ReplaceAllString(string(p), "$1")
+	s = flagSyntax.ReplaceAllString(s, "$1")
+	s = flagUnknown.ReplaceAllStringFunc(s, func(m string) string {
+		if name := flagUnknown.FindStringSubmatch(m)[2]; keyLike.MatchString(name) {
+			return "flag provided but not defined (it looks like an API key, so it is not shown)"
+		}
+		return m
+	})
+	if _, err := io.WriteString(f.w, s); err != nil {
 		return 0, err
 	}
 	return len(p), nil

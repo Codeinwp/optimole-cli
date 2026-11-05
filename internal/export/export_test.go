@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +91,8 @@ func (f *fixture) file(rel string) []byte {
 	return b
 }
 
+// downloads returns the archive requests in the order they started: the fake
+// records a request when it ends, and a stalled one can end after its retry.
 func (f *fixture) downloads() []testserver.Event {
 	var out []testserver.Event
 	for _, e := range f.srv.Events() {
@@ -97,6 +100,7 @@ func (f *fixture) downloads() []testserver.Event {
 			out = append(out, e)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
 	return out
 }
 
