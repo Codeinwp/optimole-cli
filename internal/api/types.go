@@ -26,6 +26,9 @@ type Asset struct {
 	Status   string  `json:"itemStatus"`
 	MimeType string  `json:"mimeType"`
 	URL      string  `json:"url"`
+	// Width and Height are the original image's size in pixels, when known.
+	Width  FlexInt `json:"originalWidth"`
+	Height FlexInt `json:"originalHeight"`
 }
 
 // UploadInstructions tells the client how to send the file bytes to storage.

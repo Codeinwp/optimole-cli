@@ -38,6 +38,7 @@ const (
 	RouteCreate   Route = "create"
 	RoutePut      Route = "put"
 	RouteComplete Route = "complete"
+	RouteAsset    Route = "asset"
 	RouteFolders  Route = "folders"
 )
 
@@ -92,6 +93,9 @@ type Asset struct {
 	Width        int
 	Height       int
 	HadHints     bool
+	// NoURL makes the asset's answer carry "url": null, as the dashboard
+	// does for a file that is not on the CDN yet.
+	NoURL bool
 }
 
 // Event records one request the fake handled, with sequence numbers taken
@@ -173,7 +177,7 @@ func New(t testing.TB) *Server {
 	}
 	api := http.NewServeMux()
 	api.HandleFunc("/api/assets", s.handleCreate)
-	api.HandleFunc("/api/assets/", s.handleComplete)
+	api.HandleFunc("/api/assets/", s.handleAssetPath)
 	api.HandleFunc("/api/folders", s.handleFolders)
 	api.HandleFunc("/api/asset-exports", s.handleExports)
 	api.HandleFunc("/api/asset-exports/", s.handleExport)
@@ -581,6 +585,69 @@ func firstNonEmpty(cond bool, a, b string) string {
 
 var completionPath = regexp.MustCompile(`^/api/assets/([0-9a-fA-F]{32})/completion$`)
 
+// AddAsset puts a finished asset in the library, as if it had been uploaded,
+// and returns its key (a random one when a.Key is empty).
+func (s *Server) AddAsset(a Asset) string {
+	if a.Key == "" {
+		a.Key = randomKey()
+	}
+	a.Key = strings.ToLower(a.Key)
+	a.Uploaded, a.Completed, a.UploadedSize = true, true, a.Size
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.assets[a.Key] = &a
+	return a.Key
+}
+
+var assetPath = regexp.MustCompile(`^/api/assets/([0-9a-fA-F]{32})$`)
+
+// handleAssetPath sends GET /assets/{key} to handleGetAsset and everything
+// else under /assets/ to handleComplete.
+func (s *Server) handleAssetPath(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && assetPath.MatchString(r.URL.Path) {
+		s.handleGetAsset(w, r)
+		return
+	}
+	s.handleComplete(w, r)
+}
+
+// handleGetAsset answers GET /assets/{key} like the dashboard: 403 both for
+// a key it does not know and for an asset outside a scoped key's folders.
+func (s *Server) handleGetAsset(w http.ResponseWriter, r *http.Request) {
+	ev, injected := s.begin(RouteAsset, r)
+	status := 0
+	var drop func()
+	defer func() { s.finishThenDrop(ev, status, drop) }()
+	key := strings.ToLower(assetPath.FindStringSubmatch(r.URL.Path)[1])
+	ev.Key = key
+	if injected != nil {
+		status, drop = writeInjected(w, injected)
+		return
+	}
+	if key != assetPath.FindStringSubmatch(r.URL.Path)[1] {
+		s.violate("GET %s: the key is not lower case", r.URL.Path)
+	}
+	k, ok := s.authenticate(w, r)
+	if !ok {
+		status = http.StatusUnauthorized
+		return
+	}
+	s.mu.Lock()
+	a := s.assets[key]
+	var resp map[string]any
+	var folderID int64
+	if a != nil && a.Completed {
+		resp = s.assetJSONLocked(a)
+		folderID = a.FolderID
+	}
+	s.mu.Unlock()
+	if resp == nil || (k.Scoped && !s.granted(k, folderID)) {
+		status = writeJSON(w, http.StatusForbidden, map[string]string{"message": "This action is unauthorized."})
+		return
+	}
+	status = writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	ev, injected := s.begin(RouteComplete, r)
 	status := 0
@@ -666,10 +733,14 @@ func (s *Server) assetJSONLocked(a *Asset) map[string]any {
 	if a.FolderID > 0 {
 		folder = a.FolderID
 	}
+	var u any = url
+	if a.NoURL {
+		u = nil
+	}
 	return map[string]any{
 		"resourceS3": a.Key, "folder_id": folder, "itemStatus": "done", "uploaded_status": 1,
 		"mimeType": a.ContentType, "fileSize": a.Size, "originalWidth": a.Width, "originalHeight": a.Height,
-		"url": url,
+		"url": u,
 	}
 }
 

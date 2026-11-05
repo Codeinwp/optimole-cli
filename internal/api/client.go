@@ -1,7 +1,7 @@
 // Package api is a small client for the parts of the Optimole dashboard API
 // the CLI uses: reserving an asset, sending its bytes to the presigned storage
-// URL, completing it, listing folders, and running asset exports and
-// downloading their archives.
+// URL, completing it, looking an asset up, listing folders, and running asset
+// exports and downloading their archives.
 package api
 
 import (
@@ -42,6 +42,7 @@ const (
 const (
 	OpCreateAsset    = "create asset"
 	OpCompleteUpload = "complete upload"
+	OpGetAsset       = "get asset"
 	OpListFolders    = "list folders"
 )
 
@@ -286,18 +287,31 @@ func (c *Client) CompleteAsset(ctx context.Context, key string, dims *Dimensions
 	if err := c.doJSON(ctx, OpCompleteUpload, http.MethodPost, c.endpoint("assets", strings.ToLower(key), "completion"), body, &raw, retryIdempotent); err != nil {
 		return nil, err
 	}
-	return decodeAsset(raw)
+	return decodeAsset(OpCompleteUpload, raw)
+}
+
+// GetAsset looks an asset up by its key. The dashboard answers 403 both for
+// a key it does not know and for an asset the API key may not see.
+func (c *Client) GetAsset(ctx context.Context, key string) (*Asset, error) {
+	if !assetKeyPattern.MatchString(key) {
+		return nil, fmt.Errorf("%s: invalid asset key %q", OpGetAsset, key)
+	}
+	var raw json.RawMessage
+	if err := c.doJSON(ctx, OpGetAsset, http.MethodGet, c.endpoint("assets", strings.ToLower(key)), nil, &raw, retryIdempotent); err != nil {
+		return nil, err
+	}
+	return decodeAsset(OpGetAsset, raw)
 }
 
 // decodeAsset accepts a bare AssetResource and, defensively, one wrapped in
-// "asset" or "data".
-func decodeAsset(raw json.RawMessage) (*Asset, error) {
+// "asset" or "data". op names the call in errors.
+func decodeAsset(op string, raw json.RawMessage) (*Asset, error) {
 	var wrapped struct {
 		Asset *Asset `json:"asset"`
 		Data  *Asset `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &wrapped); err != nil {
-		return nil, fmt.Errorf("complete upload: invalid JSON response: %w", err)
+		return nil, fmt.Errorf("%s: invalid JSON response: %w", op, err)
 	}
 	if wrapped.Asset != nil {
 		return wrapped.Asset, nil
@@ -307,7 +321,7 @@ func decodeAsset(raw json.RawMessage) (*Asset, error) {
 	}
 	var a Asset
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return nil, fmt.Errorf("complete upload: invalid JSON response: %w", err)
+		return nil, fmt.Errorf("%s: invalid JSON response: %w", op, err)
 	}
 	return &a, nil
 }
