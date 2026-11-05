@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +91,8 @@ func (f *fixture) file(rel string) []byte {
 	return b
 }
 
+// downloads returns the archive requests in the order they started: the fake
+// records a request when it ends, and a stalled one can end after its retry.
 func (f *fixture) downloads() []testserver.Event {
 	var out []testserver.Event
 	for _, e := range f.srv.Events() {
@@ -97,6 +100,7 @@ func (f *fixture) downloads() []testserver.Event {
 			out = append(out, e)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
 	return out
 }
 
@@ -357,7 +361,13 @@ func TestRunRestartsAStalledDownload(t *testing.T) {
 	if out.Err != nil || out.Downloaded != 1 {
 		t.Fatalf("outcome: %+v", out)
 	}
-	if d := f.downloads(); len(d) != 2 || d[1].Range != "bytes=60-" {
+	// The stalled request is recorded once its handler sees the cancel,
+	// which can be after the run returns.
+	d := f.downloads()
+	for deadline := time.Now().Add(2 * time.Second); len(d) < 2 && time.Now().Before(deadline); d = f.downloads() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(d) != 2 || d[1].Range != "bytes=60-" {
 		t.Errorf("downloads: %+v", d)
 	}
 }

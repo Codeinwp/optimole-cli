@@ -62,7 +62,8 @@ func DefaultEnv(build BuildInfo) Env {
 	}
 }
 
-const mainUsage = `optimole uploads local files into an Optimole media library and exports it.
+const mainUsage = `optimole uploads local files into an Optimole media library, exports it, and
+builds the CDN URLs of its images.
 
 Usage:
   optimole <command> [flags] [arguments]
@@ -71,6 +72,7 @@ Commands:
   upload     Upload files and directories into library folders
   folders    List the library's folders
   export     Export the library as ZIP archives and download them
+  url        Print an asset's CDN URL, resized or converted
   login      Save an API key (read from stdin)
   logout     Delete the saved API key
   version    Print the version
@@ -92,6 +94,8 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return runFolders(ctx, rest, env)
 	case "export":
 		return runExport(ctx, rest, env)
+	case "url":
+		return runURL(ctx, rest, env)
 	case "login":
 		return runLogin(ctx, rest, env)
 	case "logout":
@@ -186,9 +190,20 @@ func configPath(env Env) (string, error) {
 	return config.Path(dir), nil
 }
 
-// connect resolves the key and URL and builds a client. Errors are
-// configuration errors (exit 2); they never contain the key.
-func (c *commonFlags) connect(env Env) (*session, error) {
+// resolved is what the connection flags, the environment and the saved
+// config lead to.
+type resolved struct {
+	settings config.Settings
+	err      error
+	path     string
+	pathErr  error
+	// redact hides every key involved: the one used, and any given by flag
+	// or environment.
+	redact redact.Redactor
+}
+
+// resolve finds the key and URL without connecting.
+func (c *commonFlags) resolve(env Env) resolved {
 	path, pathErr := configPath(env)
 	in := config.Inputs{FlagAPIKey: c.apiKey, FlagAPIURL: c.apiURL, Getenv: env.Getenv}
 	if pathErr == nil {
@@ -199,15 +214,22 @@ func (c *commonFlags) connect(env Env) (*session, error) {
 	if env.Getenv != nil {
 		envKey = env.Getenv(config.EnvAPIKey)
 	}
-	red := redact.New(settings.APIKey, c.apiKey, envKey)
-	if err != nil {
-		if errors.Is(err, config.ErrNoAPIKey) && pathErr != nil {
-			return nil, fmt.Errorf("%w (%v)", err, pathErr)
+	return resolved{settings: settings, err: err, path: path, pathErr: pathErr, redact: redact.New(settings.APIKey, c.apiKey, envKey)}
+}
+
+// connect resolves the key and URL and builds a client. Errors are
+// configuration errors (exit 2); they never contain the key.
+func (c *commonFlags) connect(env Env) (*session, error) {
+	r := c.resolve(env)
+	settings, red := r.settings, r.redact
+	if r.err != nil {
+		if errors.Is(r.err, config.ErrNoAPIKey) && r.pathErr != nil {
+			return nil, fmt.Errorf("%w (%v)", r.err, r.pathErr)
 		}
-		return nil, errors.New(red.Error(err))
+		return nil, errors.New(red.Error(r.err))
 	}
 	if settings.LooseConfig {
-		fmt.Fprintf(env.Stderr, "warning: %s can be read by other users; run: chmod 600 %q\n", path, path)
+		fmt.Fprintf(env.Stderr, "warning: %s can be read by other users; run: chmod 600 %q\n", r.path, r.path)
 	}
 	client, err := newClient(env, settings.APIURL, settings.APIKey)
 	if err != nil {

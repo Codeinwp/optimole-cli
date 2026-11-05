@@ -1,12 +1,14 @@
 # optimole
 
 `optimole` uploads local files into an [Optimole](https://optimole.com) media library, into the folders you
-choose, and exports the library back as ZIP archives. It is a single binary with no dependencies.
+choose, exports the library back as ZIP archives, and builds the CDN URLs of its images, resized or
+converted. It is a single binary with no dependencies.
 
 ```sh
 optimole login                                   # paste your API key once
 optimole upload -r ./photos --folder Campaigns   # photos/2024/a.jpg -> Campaigns/2024
 optimole export start                            # export the library, download ./optimole-export-ID
+optimole url KEY --width 800 --format webp       # the image's CDN URL, 800 px wide, as WebP
 ```
 
 ## Install
@@ -346,6 +348,71 @@ An export is `queued`, `running`, `completed`, `failed` or `cancelled`. Once eve
 exports (`export_limit_reached`); delete one with `optimole export delete ID`, or wait: finished exports are
 deleted automatically 10 days after they finish.
 
+### `optimole url [flags] KEY|URL...`
+
+Prints the CDN URL of each asset key or Optimole URL, changed as the flags ask. Without arguments it reads one
+key or URL per line from stdin, and also the JSON lines of `optimole upload --json` and `optimole url --json`,
+so commands can be piped together.
+
+```sh
+# An asset's URL, 800 px wide, as WebP
+optimole url 42cf6621995747f69a30d32f6a6c4f82 --width 800 --format webp
+
+# The URLs of everything just uploaded, 1200 px wide
+optimole upload -r ./photos --json | optimole url --width 1200
+
+# Change a URL you already have (no API call, no key needed)
+optimole url 'https://abc.i.optimole.com/w:auto/h:auto/q:auto/id:42cf…/directUpload/photo.jpg' --quality 60
+
+# Chain changes
+optimole url KEY --width 800 | optimole url --resize fill --height 400 --gravity top
+```
+
+| Flag | URL option | Meaning |
+|---|---|---|
+| `--width N\|auto`, `--height N\|auto` | `w:`, `h:` | Size in pixels. |
+| `--resize TYPE` | `rt:` | `fit` (the default: keeps the aspect ratio and fits the size), `fill` (keeps the aspect ratio, fills the size and cuts what sticks out), `fill-down` (like `fill`, but an image smaller than the size is only cropped to its aspect ratio), `force` (ignores the aspect ratio) or `auto` (`fill` when the image and the size have the same orientation, else `fit`). |
+| `--gravity POS` | `g:` | The part `fill` keeps: `center`, `top`, `bottom`, `left`, `right`, `top-left`, `top-right`, `bottom-left`, `bottom-right` or `smart`. |
+| `--focus X:Y` | `g:fp:X:Y` | The point `fill` keeps, as fractions: `0:0` is the top left, `1:1` the bottom right. |
+| `--quality Q` | `q:` | `auto`, `mauto`, `eco` or 1–100. |
+| `--format F` | `f:` | `auto` removes `f:`, and the CDN serves each browser AVIF or WebP when it accepts them; or force `webp`, `jpg`, `png`, `gif`, `ico`, `jxl` or `heic`. |
+| `--dpr N` | `dpr:` | Pixel density, 1–5. |
+| `--download` | `att:1` | Serve the image as a download. |
+| `--set NAME:VALUE` | any | Any other option the CDN reads, e.g. `--set bl:5` (blur) or `--set c:300:200:ce` (crop); repeatable. Unknown names are refused, because the CDN drops them silently. |
+| `--unset NAME` | | Remove an option from the URL; repeatable. |
+| `--reset` | | Start from `w:auto/h:auto/q:auto`, dropping the URL's options. |
+| `-c`, `--concurrency N` | | Keys looked up in parallel, 1–16 (default 4). |
+| `--json` | | One JSON object per input. |
+| `--api-key`, `--api-url` | | See [Authentication](#authentication). |
+
+#### How URLs are changed
+
+- A key is looked up with `GET /api/assets/{key}`, which gives its URL on the account's delivery domain
+  (custom domains included). A URL is changed locally: no API call and no key are needed.
+- An option already in the URL is replaced, never added a second time: the CDN uses only the first copy of an
+  option, so a second `w:` would do nothing. Options the flags do not name are kept.
+- Options are written in the order the CDN applies them, so the same changes always give the same URL.
+- Two flags that change the same option (`--width` and `--set w:…`, `--gravity` and `--focus`) are an error.
+- Values are checked the way the CDN reads them. The CDN answers a bad `w`, `h` or `q` with an empty image,
+  and ignores a cache buster (`cb:`) unless it looks like `abc.1` (3 or more characters, a dot, then more), so
+  those are refused.
+- `--format avif` is refused: the CDN drops `f:avif` and picks the format from the browser instead, which is
+  what `--format auto` asks for.
+- Files that are not images (their URLs have `/files/`, or CSS and JS assets) are printed as they are; image
+  flags are an error for them.
+- A URL the CDN would misread is refused: one with spaces or control characters (a newline would also print
+  two URLs), or one whose origin path holds a segment the CDN takes for an option, such as `w:9` when the URL
+  sets no `w:` of its own.
+
+#### Output
+
+One URL per line, in input order; a failed input is reported on stderr and the others are still printed. With
+`--json`, each input gives one object: `input`, `url` and, when known, `key`, `mime_type`, `original_width`
+and `original_height`; a failed input gives `input`, `error` and `code` (`invalid_input`, `not_found`,
+`no_url` or `not_an_image`). A key the dashboard does not know and a key outside a folder-scoped key's folders
+both answer `not_found`. A rejected API key stops the run. Messages never show the API keys in use (flag,
+environment or saved key), and a line that looks like an API key is not echoed at all.
+
 ### `optimole login`, `optimole logout`
 
 `login` reads the key from stdin: type or paste it at the prompt, or pipe it (`optimole login < key.txt`;
@@ -362,9 +429,9 @@ Prints the version, commit and build date.
 
 | Code | Meaning |
 |---|---|
-| 0 | Every selected file was uploaded (skipped files do not count). For `export start` and `export download`: the export completed and every selected archive is on disk (`export start --no-wait`: the export was started, or one was already running). |
-| 1 | At least one file failed, there was nothing to upload, or the output could not be written. For exports: the export failed or was cancelled, an archive failed, `--timeout` passed, or the account keeps the most exports it may. |
-| 2 | Usage or configuration error (bad flags, a directory without `-r`, an unknown `--domain`, missing key, non-https URL). Nothing was uploaded or downloaded. |
+| 0 | Every selected file was uploaded (skipped files do not count). For `export start` and `export download`: the export completed and every selected archive is on disk (`export start --no-wait`: the export was started, or one was already running). For `url`: every input was printed. |
+| 1 | At least one file failed, there was nothing to upload, or the output could not be written. For exports: the export failed or was cancelled, an archive failed, `--timeout` passed, or the account keeps the most exports it may. For `url`: an input failed (the others are still printed), or the API key was rejected. |
+| 2 | Usage or configuration error (bad flags, a directory without `-r`, an unknown `--domain`, missing key, non-https URL). Nothing was uploaded or downloaded. For `url`, a missing key stops the run at the first asset key. |
 | 130 | Interrupted with Ctrl-C. |
 
 ## Limits
@@ -373,7 +440,8 @@ Prints the version, commit and build date.
   Reservations count towards it until they are completed or settled by the server's hourly cleanup, which
   is another reason the CLI avoids reserving an asset twice for one file.
 - The API allows 300 requests per minute per account; each file takes 2 API requests plus the storage upload,
-  so very large batches may see `429` answers, which the CLI waits out.
+  and each key given to `optimole url` one, so very large batches may see `429` answers, which the CLI waits
+  out. URLs given to `optimole url` take none.
 - A presigned upload URL is valid for 15 minutes.
 - An account runs one export at a time and keeps at most 5. Export archives are about 1 GB each (a part can be
   larger when its first files are), and their download URLs are valid for a day.

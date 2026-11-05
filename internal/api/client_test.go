@@ -667,7 +667,7 @@ func TestDecodeAssetShapes(t *testing.T) {
 		`{"asset":{"resourceS3":"k","url":"https://x/u","folder_id":"12"}}`,
 		`{"data":{"resourceS3":"k","url":"https://x/u","folder_id":12}}`,
 	} {
-		a, err := decodeAsset([]byte(body))
+		a, err := decodeAsset(OpCompleteUpload, []byte(body))
 		if err != nil || a.URL != "https://x/u" || a.FolderID.Value != 12 {
 			t.Errorf("decodeAsset(%s) = %+v, %v", body, a, err)
 		}
@@ -748,5 +748,67 @@ func TestBackoffIsCapped(t *testing.T) {
 		if d <= 0 || d > defaultMaxDelay {
 			t.Fatalf("backoff(%d) = %v", attempt, d)
 		}
+	}
+}
+
+func TestGetAsset(t *testing.T) {
+	srv := testserver.New(t)
+	c, sl := newTestClient(t, srv.URL)
+	ctx := context.Background()
+	key := srv.AddAsset(testserver.Asset{Filename: "photo.jpg", ContentType: "image/jpeg", Size: 9, Width: 1200, Height: 800})
+
+	a, err := c.GetAsset(ctx, strings.ToUpper(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://app.i.optimole.com/w:auto/h:auto/q:auto/id:" + key + "/directUpload/photo.jpg"
+	if a.Key != key || a.URL != want || a.MimeType != "image/jpeg" || a.Width.Value != 1200 || a.Height.Value != 800 {
+		t.Fatalf("asset = %+v", a)
+	}
+	if ev := srv.Events()[0]; ev.Route != testserver.RouteAsset || ev.Key != key {
+		t.Fatalf("event = %+v", ev)
+	}
+
+	// An unknown key is a 403, which is final.
+	_, err = c.GetAsset(ctx, strings.Repeat("ab", 16))
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden || apiErr.Op != OpGetAsset || srv.Count(testserver.RouteAsset) != 2 {
+		t.Fatalf("err = %v, %d calls", err, srv.Count(testserver.RouteAsset))
+	}
+
+	// A busy dashboard is retried: the lookup is safe to repeat.
+	srv.Inject(testserver.RouteAsset, testserver.Response{Status: http.StatusServiceUnavailable, Body: `{"message":"Busy."}`})
+	if _, err := c.GetAsset(ctx, key); err != nil || srv.Count(testserver.RouteAsset) != 4 || len(sl.all()) != 1 {
+		t.Fatalf("err = %v, %d calls, %d waits", err, srv.Count(testserver.RouteAsset), len(sl.all()))
+	}
+
+	sent := len(srv.Events())
+	for _, bad := range []string{"", "../../me", key + "0", "zz" + key[2:]} {
+		if _, err := c.GetAsset(ctx, bad); err == nil {
+			t.Fatalf("GetAsset(%q) succeeded", bad)
+		}
+	}
+	if n := len(srv.Events()); n != sent {
+		t.Fatalf("invalid keys sent %d requests", n-sent)
+	}
+}
+
+func TestGetAssetHonoursFolderScopedKeys(t *testing.T) {
+	srv := testserver.New(t)
+	shared := srv.AddFolder("Shared")
+	other := srv.AddFolder("Other")
+	srv.AddKey("optml-s-scoped", testserver.Key{Scoped: true, Granted: []int64{shared}})
+	inShared := srv.AddAsset(testserver.Asset{Filename: "a.jpg", ContentType: "image/jpeg", FolderID: shared})
+	inOther := srv.AddAsset(testserver.Asset{Filename: "b.jpg", ContentType: "image/jpeg", FolderID: other})
+	c, err := New(Options{BaseURL: srv.URL, APIKey: "optml-s-scoped", UserAgent: "optimole-cli/test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetAsset(context.Background(), inShared); err != nil {
+		t.Fatalf("asset in a shared folder: %v", err)
+	}
+	var apiErr *Error
+	if _, err := c.GetAsset(context.Background(), inOther); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("asset outside the shared folders: %v", err)
 	}
 }
