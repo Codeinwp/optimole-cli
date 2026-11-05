@@ -467,6 +467,19 @@ func TestURLRedactsKeysInEveryMessage(t *testing.T) {
 			t.Fatalf("%v: %s", args[2:], h.stderr.String())
 		}
 	}
+	// A key given only with --api-key, repeated as another flag's value.
+	flagKey := "flag.only.secret.key"
+	for _, args := range [][]string{
+		{"url", urlImage, "--api-key", flagKey, "-c", flagKey},
+		{"url", urlImage, "-api-key=" + flagKey, "--json=" + flagKey},
+	} {
+		if code := h.run(args...); code != ExitUsage {
+			t.Fatalf("%v: exit %d, want 2", args[2:], code)
+		}
+		if strings.Contains(h.stderr.String(), flagKey) || !strings.Contains(h.stderr.String(), "[REDACTED]") {
+			t.Fatalf("%v: %s", args[2:], h.stderr.String())
+		}
+	}
 	// In an error's own text, in both output modes.
 	withCredentials := "https://" + secret + "@mlabc.i.optimole.com/id:" + urlHash + "/a.jpg"
 	for _, args := range [][]string{{"url", withCredentials}, {"url", withCredentials, "--json"}} {

@@ -191,9 +191,11 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	fs := newFlagSet("url", urlUsage, env)
 	var common commonFlags
 	common.register(fs, true)
-	// The flag package echoes a bad value; hide the keys known before the
-	// flags are read (environment and saved key) in what it prints.
-	fs.SetOutput(redactingWriter{w: env.Stderr, redact: common.resolve(env).redact})
+	// The flag package echoes a bad value; hide the keys in what it prints:
+	// the environment's, the saved one, and one given with --api-key, read
+	// here because the flags are not parsed yet.
+	early := commonFlags{apiKey: apiKeyArg(args)}
+	fs.SetOutput(redactingWriter{w: env.Stderr, redact: early.resolve(env).redact})
 	var f urlFlags
 	var jsonOut bool
 	concurrency := urlDefaultConcurrency
@@ -250,6 +252,28 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	env.Stderr = &lockedWriter{w: env.Stderr}
 	run := &urlRun{env: env, common: &common, edits: edits, redact: red}
 	return run.run(ctx, inputs, concurrency, jsonOut)
+}
+
+// apiKeyArg returns the value of the last --api-key in args (any form the
+// flag package takes: -api-key V, --api-key=V), or "".
+func apiKeyArg(args []string) string {
+	key := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			break
+		}
+		name, value, hasValue := strings.Cut(strings.TrimLeft(args[i], "-"), "=")
+		if !strings.HasPrefix(args[i], "-") || name != "api-key" {
+			continue
+		}
+		if hasValue {
+			key = value
+		} else if i+1 < len(args) {
+			key = args[i+1]
+			i++
+		}
+	}
+	return key
 }
 
 // redactingWriter hides secrets in what it passes on.
