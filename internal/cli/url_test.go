@@ -424,7 +424,7 @@ func TestURLDoesNotEchoAPIKeys(t *testing.T) {
 	if out := h.stdout.String() + h.stderr.String(); strings.Contains(out, secret) || strings.Count(out, "[REDACTED]") != 2 {
 		t.Fatalf("the configured key is printed:\n%s", out)
 	}
-	scoped :="optml-s" + strings.Repeat("Ab3", 19)
+	scoped := "optml-s" + strings.Repeat("Ab3", 19)
 	if code := h.run("url", scoped); code != ExitFailure {
 		t.Fatalf("exit %d, want 1", code)
 	}
@@ -444,5 +444,38 @@ func TestURLRefusesURLsTheCDNWouldMisread(t *testing.T) {
 	}
 	if got := h.jsonLines()[0]; got["code"] != "invalid_input" || !strings.Contains(got["error"].(string), `"w:9"`) {
 		t.Fatalf("line = %v", got)
+	}
+}
+
+func TestURLRedactsKeysInEveryMessage(t *testing.T) {
+	h := newHarness(t)
+	secret := "my.saved.secret.key"
+	h.vars[config.EnvAPIKey] = secret
+	// In a usage error.
+	if code := h.run("url", urlImage, "--width", secret); code != ExitUsage {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if strings.Contains(h.stderr.String(), secret) || !strings.Contains(h.stderr.String(), "[REDACTED]") {
+		t.Fatalf("usage error: %s", h.stderr.String())
+	}
+	// In an error's own text, in both output modes.
+	withCredentials := "https://" + secret + "@mlabc.i.optimole.com/id:" + urlHash + "/a.jpg"
+	for _, args := range [][]string{{"url", withCredentials}, {"url", withCredentials, "--json"}} {
+		if code := h.run(args...); code != ExitFailure {
+			t.Fatalf("%v: exit %d, want 1", args, code)
+		}
+		if out := h.stdout.String() + h.stderr.String(); strings.Contains(out, secret) || !strings.Contains(out, "invalid host") {
+			t.Fatalf("%v printed the key:\n%s", args, out)
+		}
+	}
+	// In a long line, which is shortened only after the key is hidden.
+	long := strings.Repeat("x", 110) + " " + secret // cut at 120 characters, inside the key
+	for _, args := range [][]string{{"url", long}, {"url", long, "--json"}} {
+		if code := h.run(args...); code != ExitFailure {
+			t.Fatalf("exit %d, want 1", code)
+		}
+		if out := h.stdout.String() + h.stderr.String(); strings.Contains(out, secret[:6]) {
+			t.Fatalf("%v printed part of the key:\n%s", args[2:], out)
+		}
 	}
 }

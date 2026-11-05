@@ -214,11 +214,14 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	if err != nil {
 		return flagExit(err)
 	}
+	// Flag values are echoed in usage errors: a key given by mistake must
+	// not be.
+	red := common.resolve(env).redact
 	visited := map[string]bool{}
 	fs.Visit(func(fl *flag.Flag) { visited[fl.Name] = true })
 	edits, err := f.edits(visited)
 	if err != nil {
-		return usageError(env, "url", "%v", err)
+		return usageError(env, "url", "%s", red.String(err.Error()))
 	}
 	if concurrency < 1 || concurrency > urlMaxConcurrency {
 		return usageError(env, "url", "--concurrency must be between 1 and %d", urlMaxConcurrency)
@@ -242,7 +245,7 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	// The first key connects inside a lookup, whose warnings would otherwise
 	// race the results written to stderr.
 	env.Stderr = &lockedWriter{w: env.Stderr}
-	run := &urlRun{env: env, common: &common, edits: edits, redact: common.resolve(env).redact}
+	run := &urlRun{env: env, common: &common, edits: edits, redact: red}
 	return run.run(ctx, inputs, concurrency, jsonOut)
 }
 
@@ -311,7 +314,7 @@ func classify(line string) urlInput {
 	case keyLike.MatchString(s):
 		return urlInput{shown: "(hidden)", err: errors.New("not an asset key or an Optimole URL; it looks like an API key, so it is not shown")}
 	}
-	return urlInput{shown: shorten(s), err: errors.New("not an asset key (32 hexadecimal characters) or an Optimole URL")}
+	return urlInput{shown: s, err: errors.New("not an asset key (32 hexadecimal characters) or an Optimole URL")}
 }
 
 // classifyJSON reads a line of "optimole upload --json" or "optimole url --json".
@@ -326,7 +329,7 @@ func classifyJSON(s string) urlInput {
 		Summary        json.RawMessage `json:"summary"`
 	}
 	if err := json.Unmarshal([]byte(s), &line); err != nil {
-		return urlInput{shown: shorten(s), err: errors.New("not valid JSON")}
+		return urlInput{shown: s, err: errors.New("not valid JSON")}
 	}
 	if line.Summary != nil {
 		return urlInput{skip: true}
@@ -334,7 +337,7 @@ func classifyJSON(s string) urlInput {
 	if line.URL != "" {
 		return urlInput{shown: line.URL, url: line.URL, mimeType: line.MimeType, width: line.OriginalWidth, height: line.OriginalHeight}
 	}
-	in := urlInput{shown: shorten(s)}
+	in := urlInput{shown: s}
 	if line.Path != "" {
 		in.shown = line.Path
 	}
@@ -368,9 +371,10 @@ type urlResult struct {
 	err  error
 	code string
 	// fatal, when not zero, stops the run with this exit code after
-	// printing fatalMsg. It is set when the API key is missing or rejected,
-	// which would fail every later key the same way; later inputs are not
-	// read.
+	// printing fatalMsg: nothing more is printed, and the lookups still
+	// running are cancelled. It is set when connecting fails (no API key, a
+	// bad API URL) or the API key is rejected, which would fail every later
+	// key the same way.
 	fatal    int
 	fatalMsg string
 }
@@ -403,7 +407,17 @@ func (r *urlRun) run(ctx context.Context, inputs func(context.Context) (<-chan s
 	go func() {
 		defer close(results)
 		sem := make(chan struct{}, concurrency)
-		for line := range lines {
+		for {
+			var line string
+			var more bool
+			select {
+			case line, more = <-lines:
+			case <-runCtx.Done():
+				return
+			}
+			if !more {
+				return
+			}
 			in := classify(line)
 			if in.skip {
 				continue
@@ -462,9 +476,9 @@ func (r *urlRun) run(ctx context.Context, inputs func(context.Context) (<-chan s
 		if res.err != nil {
 			failed++
 			if jsonOut {
-				enc.Encode(urlLine{Input: r.redact.String(res.in.shown), Error: r.redact.String(res.err.Error()), Code: res.code})
+				enc.Encode(urlLine{Input: shorten(r.redact.String(res.in.shown)), Error: r.redact.String(res.err.Error()), Code: res.code})
 			} else {
-				fmt.Fprintf(r.env.Stderr, "optimole url: %s: %s\n", r.printable(res.in.shown), r.printable(res.err.Error()))
+				fmt.Fprintf(r.env.Stderr, "optimole url: %s: %s\n", r.printable(shorten(r.redact.String(res.in.shown))), r.printable(res.err.Error()))
 			}
 		} else if jsonOut {
 			enc.Encode(urlLine{

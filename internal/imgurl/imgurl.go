@@ -51,8 +51,9 @@ type URL struct {
 	// Set and Options use its first copy, the one the CDN applies, and
 	// Unset removes every copy.
 	options []Option
-	// extra are the other segments before the source, kept as they are:
-	// "files" marks a file URL, and the CDN ignores the rest.
+	// extra are the other segments before the source: "files" marks a file
+	// URL, and the CDN ignores the rest. Before an origin URL the CDN removes
+	// them, so Parse drops them there, "files" aside.
 	extra []string
 	// source is the rest of the path, from "id:" or the origin's scheme.
 	source string
@@ -101,7 +102,9 @@ func Parse(raw string) (*URL, error) {
 			u.options = append(u.options, Option{name, value})
 			continue
 		}
-		u.extra = append(u.extra, seg)
+		if u.ID() != "" || seg == "files" {
+			u.extra = append(u.extra, seg)
+		}
 	}
 	if !isOptimoleHost(host) && start > 0 && len(u.options) == 0 && u.ID() == "" {
 		return nil, fmt.Errorf("%w: %s is not an Optimole host and the path has no CDN options", ErrNotOptimole, host)
@@ -158,21 +161,34 @@ func (u *URL) ID() string {
 	return id
 }
 
-// Validate reports a URL the CDN would misread. The CDN looks for options in
-// the whole path, the origin's own path included, so a segment there such as
-// "w:9" counts as an option unless the URL already sets that option before
-// the source.
+// Validate reports a URL the CDN would misread because of a segment of the
+// origin's own path:
+//   - The CDN looks for options in the whole path, so a segment such as "w:9"
+//     counts as an option unless the URL already sets that option before the
+//     source.
+//   - It deletes the first "/ig:avif" and the first "/f:avif" in the path, so
+//     one in the origin path is deleted unless the URL's options hold it.
 func (u *URL) Validate() error {
 	segs := strings.Split(u.source, "/")
 	for _, seg := range segs[1:] {
-		name, _, ok := strings.Cut(seg, ":")
-		if !ok || !(IsOption(name) || name == "id") {
-			continue
+		name, value, ok := strings.Cut(seg, ":")
+		var misread bool
+		switch {
+		case !ok:
+		case seg == "ig:avif" || seg == "f:avif":
+			v, _ := u.Get(name)
+			misread = v != value
+		case name == "ig":
+			// The CDN reads no other "ig" value.
+		case name == "id":
+			misread = u.ID() == ""
+		case IsOption(name):
+			_, set := u.Get(name)
+			misread = !set
 		}
-		if _, set := u.Get(name); set || (name == "id" && u.ID() != "") {
-			continue
+		if misread {
+			return fmt.Errorf("the origin path has %q, which the CDN reads as an option, so it would misread this URL", seg)
 		}
-		return fmt.Errorf("the origin path has %q, which the CDN reads as an option, so it would misread this URL", seg)
 	}
 	return nil
 }

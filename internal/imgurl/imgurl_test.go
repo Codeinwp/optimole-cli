@@ -118,6 +118,13 @@ func TestParseReadsPartsLikeTheCDN(t *testing.T) {
 			out:     "https://cdn.example.com/w:640/https://example.com/a.jpg",
 		},
 		{
+			name:    "before an origin URL, segments the CDN removes are dropped",
+			raw:     "https://cdn.example.com/w:640/extra/files/https://example.com/a.jpg",
+			options: []Option{{"w", "640"}},
+			kind:    File,
+			out:     "https://cdn.example.com/w:640/files/https://example.com/a.jpg",
+		},
+		{
 			name: "a custom domain whose path starts with the origin URL",
 			raw:  "https://cdn.example.com/https://example.com/a.jpg",
 			kind: Image,
@@ -222,6 +229,13 @@ func TestValidateFindsOptionsTheCDNReadsInTheOriginPath(t *testing.T) {
 		{"https://mlabc.i.optimole.com/w:300/https://example.com/id:9/a.jpg", true},
 		{"https://mlabc.i.optimole.com/w:300/id:" + hash + "/directUpload/id:x/a.jpg", false},
 		{"https://mlabc.i.optimole.com/w:300/https://example.com:8443/x:9/a.jpg", false},
+		// The CDN reads no "ig" value but avif, and deletes the first
+		// "/ig:avif" and "/f:avif" in the path.
+		{"https://mlabc.i.optimole.com/w:300/https://example.com/uploads/ig:other/a.jpg", false},
+		{"https://mlabc.i.optimole.com/w:300/https://example.com/uploads/ig:avif/a.jpg", true},
+		{"https://mlabc.i.optimole.com/w:300/ig:avif/https://example.com/uploads/ig:avif/a.jpg", false},
+		{"https://mlabc.i.optimole.com/f:best/https://example.com/f:avif/a.jpg", true},
+		{"https://mlabc.i.optimole.com/f:avif/https://example.com/f:avif/a.jpg", false},
 		{libImage, false},
 	}
 	for _, tt := range tests {
@@ -229,6 +243,12 @@ func TestValidateFindsOptionsTheCDNReadsInTheOriginPath(t *testing.T) {
 		if (err != nil) != tt.bad {
 			t.Errorf("Validate(%q) = %v, want an error: %v", tt.raw, err, tt.bad)
 		}
+	}
+	// A custom-domain URL left without options still parses back.
+	c := mustParse(t, "https://cdn.example.com/w:640/extra/https://example.com/a.jpg")
+	c.Unset("w")
+	if got := mustParse(t, c.String()).String(); got != "https://cdn.example.com/https://example.com/a.jpg" {
+		t.Fatalf("round trip = %q", got)
 	}
 	// Removing the option that shadowed it makes the URL one the CDN misreads.
 	u := mustParse(t, "https://mlabc.i.optimole.com/w:300/https://example.com/w:9/a.jpg")
