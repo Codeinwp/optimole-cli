@@ -458,26 +458,24 @@ func TestURLRedactsKeysInEveryMessage(t *testing.T) {
 	if strings.Contains(h.stderr.String(), secret) || !strings.Contains(h.stderr.String(), "[REDACTED]") {
 		t.Fatalf("usage error: %s", h.stderr.String())
 	}
-	// In the flag package's own errors.
-	for _, args := range [][]string{{"url", urlImage, "-c", secret}, {"url", urlImage, "--json=" + secret}} {
-		if code := h.run(args...); code != ExitUsage {
-			t.Fatalf("%v: exit %d, want 2", args[2:], code)
-		}
-		if strings.Contains(h.stderr.String(), secret) || !strings.Contains(h.stderr.String(), "[REDACTED]") {
-			t.Fatalf("%v: %s", args[2:], h.stderr.String())
-		}
-	}
-	// A key given only with --api-key, repeated as another flag's value.
-	flagKey := "flag.only.secret.key"
-	for _, args := range [][]string{
-		{"url", urlImage, "--api-key", flagKey, "-c", flagKey},
-		{"url", urlImage, "-api-key=" + flagKey, "--json=" + flagKey},
+	// In the flag package's own errors, which never show the bad value,
+	// whatever key it is.
+	other := "flag.only.secret.key"
+	for _, tt := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-c", secret}, "invalid value for flag -c"},
+		{[]string{"--json=" + secret}, "invalid boolean value for -json"},
+		{[]string{"--api-key", other, "-c", other}, "invalid value for flag -c"},
+		{[]string{"--width", "--", "--api-key", other, "-c", other}, "invalid value for flag -c"},
+		{[]string{"--api-key", other, "-c", secret, "--api-key", "x"}, "invalid value for flag -c"},
 	} {
-		if code := h.run(args...); code != ExitUsage {
-			t.Fatalf("%v: exit %d, want 2", args[2:], code)
+		if code := h.run(append([]string{"url", urlImage}, tt.args...)...); code != ExitUsage {
+			t.Fatalf("%v: exit %d, want 2", tt.args, code)
 		}
-		if strings.Contains(h.stderr.String(), flagKey) || !strings.Contains(h.stderr.String(), "[REDACTED]") {
-			t.Fatalf("%v: %s", args[2:], h.stderr.String())
+		if got := h.stderr.String(); strings.Contains(got, secret) || strings.Contains(got, other) || !strings.Contains(got, tt.want) {
+			t.Fatalf("%v: %s", tt.args, got)
 		}
 	}
 	// In an error's own text, in both output modes.

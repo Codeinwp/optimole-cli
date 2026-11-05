@@ -191,11 +191,7 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	fs := newFlagSet("url", urlUsage, env)
 	var common commonFlags
 	common.register(fs, true)
-	// The flag package echoes a bad value; hide the keys in what it prints:
-	// the environment's, the saved one, and one given with --api-key, read
-	// here because the flags are not parsed yet.
-	early := commonFlags{apiKey: apiKeyArg(args)}
-	fs.SetOutput(redactingWriter{w: env.Stderr, redact: early.resolve(env).redact})
+	fs.SetOutput(flagErrorWriter{w: env.Stderr})
 	var f urlFlags
 	var jsonOut bool
 	concurrency := urlDefaultConcurrency
@@ -254,36 +250,16 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	return run.run(ctx, inputs, concurrency, jsonOut)
 }
 
-// apiKeyArg returns the value of the last --api-key in args (any form the
-// flag package takes: -api-key V, --api-key=V), or "".
-func apiKeyArg(args []string) string {
-	key := ""
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--" {
-			break
-		}
-		name, value, hasValue := strings.Cut(strings.TrimLeft(args[i], "-"), "=")
-		if !strings.HasPrefix(args[i], "-") || name != "api-key" {
-			continue
-		}
-		if hasValue {
-			key = value
-		} else if i+1 < len(args) {
-			key = args[i+1]
-			i++
-		}
-	}
-	return key
-}
+// flagValue matches the value the flag package quotes in its errors:
+// `invalid value "x" for flag -c`, `invalid boolean value "x" for -json`.
+var flagValue = regexp.MustCompile(`(invalid (?:boolean )?value) "(?:[^"\\]|\\.)*"`)
 
-// redactingWriter hides secrets in what it passes on.
-type redactingWriter struct {
-	w      io.Writer
-	redact redact.Redactor
-}
+// flagErrorWriter drops the values the flag package quotes in its errors:
+// one could be an API key given by mistake, from any source.
+type flagErrorWriter struct{ w io.Writer }
 
-func (r redactingWriter) Write(p []byte) (int, error) {
-	if _, err := io.WriteString(r.w, r.redact.String(string(p))); err != nil {
+func (f flagErrorWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(f.w, flagValue.ReplaceAllString(string(p), "$1")); err != nil {
 		return 0, err
 	}
 	return len(p), nil
