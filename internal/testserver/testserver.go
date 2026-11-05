@@ -601,8 +601,6 @@ func (s *Server) AddAsset(a Asset) string {
 
 var assetPath = regexp.MustCompile(`^/api/assets/([0-9a-fA-F]{32})$`)
 
-// handleAssetPath sends GET /assets/{key} to handleGetAsset and everything
-// else under /assets/ to handleComplete.
 func (s *Server) handleAssetPath(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && assetPath.MatchString(r.URL.Path) {
 		s.handleGetAsset(w, r)
@@ -618,13 +616,14 @@ func (s *Server) handleGetAsset(w http.ResponseWriter, r *http.Request) {
 	status := 0
 	var drop func()
 	defer func() { s.finishThenDrop(ev, status, drop) }()
-	key := strings.ToLower(assetPath.FindStringSubmatch(r.URL.Path)[1])
+	sent := assetPath.FindStringSubmatch(r.URL.Path)[1]
+	key := strings.ToLower(sent)
 	ev.Key = key
 	if injected != nil {
 		status, drop = writeInjected(w, injected)
 		return
 	}
-	if key != assetPath.FindStringSubmatch(r.URL.Path)[1] {
+	if key != sent {
 		s.violate("GET %s: the key is not lower case", r.URL.Path)
 	}
 	k, ok := s.authenticate(w, r)

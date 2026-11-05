@@ -3,6 +3,7 @@ package imgurl
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -151,11 +152,20 @@ func Focus(v string) (string, error) {
 }
 
 func fraction(s string) (string, error) {
-	f, err := strconv.ParseFloat(s, 64)
+	f, err := finite(s)
 	if err != nil || f < 0 || f > 1 {
 		return "", errors.New("not a fraction")
 	}
 	return strconv.FormatFloat(f, 'f', -1, 64), nil
+}
+
+// finite parses a number, refusing NaN and infinities.
+func finite(s string) (float64, error) {
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, errors.New("not a number")
+	}
+	return f, nil
 }
 
 // checkGravityValue accepts a gravity code with optional X:Y offsets in
@@ -164,6 +174,10 @@ func fraction(s string) (string, error) {
 func checkGravityValue(v string) error {
 	code, rest, hasRest := strings.Cut(v, ":")
 	if code == "fp" {
+		// The CDN reads the point only in this form: fp:X:Y.
+		if strings.Contains(rest, ",") {
+			return errors.New("must be fp:X:Y, with colons")
+		}
 		_, err := Focus(rest)
 		return err
 	}
@@ -178,8 +192,8 @@ func checkGravityValue(v string) error {
 		return nil
 	}
 	xs, ys, ok := strings.Cut(rest, ":")
-	_, errX := strconv.ParseFloat(xs, 64)
-	_, errY := strconv.ParseFloat(ys, 64)
+	_, errX := finite(xs)
+	_, errY := finite(ys)
 	if !ok || errX != nil || errY != nil {
 		return errors.New("gravity offsets must be two numbers: " + code + ":X:Y")
 	}
@@ -223,21 +237,18 @@ func DPR(v string) (string, error) {
 	return v, nil
 }
 
-// checkCacheBuster applies the CDN's rule: it drops a cache buster unless it
-// has at least 3 characters, a dot, and at least 1 more character (cache
-// tokens from the dashboard look like "aB3d.1f").
+// checkCacheBuster applies the CDN's rule: it reads the value up to a colon,
+// and drops it unless it has at least 3 characters, a dot, and at least 1
+// more character (cache tokens from the dashboard look like "aB3d.1f").
 func checkCacheBuster(v string) error {
 	parts := strings.Split(v, ".")
-	if len(parts) < 2 || len(parts[0]) < 3 || len(parts[1]) < 1 {
+	if strings.Contains(v, ":") || len(parts) < 2 || len(parts[0]) < 3 || len(parts[1]) < 1 {
 		return errors.New(`must look like "abc.1" (3 or more characters, a dot, then more); the CDN ignores any other value`)
 	}
 	return nil
 }
 
-// list joins values as "a, b or c".
+// list joins two or more values as "a, b or c".
 func list(values []string) string {
-	if len(values) < 2 {
-		return strings.Join(values, "")
-	}
 	return strings.Join(values[:len(values)-1], ", ") + " or " + values[len(values)-1]
 }

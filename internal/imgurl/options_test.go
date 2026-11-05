@@ -29,7 +29,7 @@ func TestTypedValues(t *testing.T) {
 			[]string{"", "middle", "north", "fp", "obj"}},
 		{"Focus", Focus,
 			map[string]string{"0.5:0.2": "fp:0.5:0.2", "0,1": "fp:0:1", "1:0.25": "fp:1:0.25", ".5:.5": "fp:0.5:0.5"},
-			[]string{"", "0.5", "1.5:0", "0:-0.1", "a:b", "0.5:0.5:0.5"}},
+			[]string{"", "0.5", "1.5:0", "0:-0.1", "a:b", "0.5:0.5:0.5", "NaN:0", "0:NaN", "Inf:0"}},
 		{"Format", Format,
 			map[string]string{"auto": "", "webp": "webp", "JPG": "jpg", "jpeg": "jpg", "png": "png", "gif": "gif",
 				"ico": "ico", "jxl": "jxl", "heic": "heic"},
@@ -76,7 +76,8 @@ func TestCheck(t *testing.T) {
 		{"bl", ""}, {"bl", "5/6"}, {"bl", "5 6"}, {"bl", "a?b"}, {"bl", "a#b"}, {"bl", "50%"}, {"bl", "a\x00"},
 		{"w", "0"}, {"h", "x"}, {"q", "200"}, {"rt", "crop"}, {"dpr", "9"},
 		{"g", "middle"}, {"g", "fp"}, {"g", "fp:2:0"}, {"g", "ce:1"}, {"g", "ce:a:b"},
-		{"cb", "abc123xyz789"}, {"cb", "ab.c"}, {"cb", "abc."}, {"cb", ".abc"},
+		{"g", "fp:0,1"}, {"g", "fp:NaN:0"}, {"g", "ce:NaN:0"}, {"g", "ce:Inf:0"},
+		{"cb", "abc123xyz789"}, {"cb", "ab.c"}, {"cb", "abc."}, {"cb", ".abc"}, {"cb", "x:abc.d"}, {"cb", "abc.d:x"},
 	}
 	for _, b := range bad {
 		if err := Check(b[0], b[1]); err == nil {

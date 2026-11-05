@@ -400,6 +400,9 @@ optimole url KEY --width 800 | optimole url --resize fill --height 400 --gravity
   what `--format auto` asks for.
 - Files that are not images (their URLs have `/files/`, or CSS and JS assets) are printed as they are; image
   flags are an error for them.
+- A URL the CDN would misread is refused: one with spaces or control characters (a newline would also print
+  two URLs), or one whose origin path holds a segment the CDN takes for an option, such as `w:9` when the URL
+  sets no `w:` of its own.
 
 #### Output
 
@@ -407,7 +410,8 @@ One URL per line, in input order; a failed input is reported on stderr and the o
 `--json`, each input gives one object: `input`, `url` and, when known, `key`, `mime_type`, `original_width`
 and `original_height`; a failed input gives `input`, `error` and `code` (`invalid_input`, `not_found`,
 `no_url` or `not_an_image`). A key the dashboard does not know and a key outside a folder-scoped key's folders
-both answer `not_found`. A rejected API key stops the run.
+both answer `not_found`. A rejected API key stops the run. Messages never show the API keys in use (flag,
+environment or saved key), and a line that looks like an API key is not echoed at all.
 
 ### `optimole login`, `optimole logout`
 

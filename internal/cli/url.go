@@ -11,12 +11,15 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/Codeinwp/optimole-cli/internal/api"
 	"github.com/Codeinwp/optimole-cli/internal/imgurl"
 	"github.com/Codeinwp/optimole-cli/internal/output"
+	"github.com/Codeinwp/optimole-cli/internal/redact"
 	"github.com/Codeinwp/optimole-cli/internal/termecho"
 )
 
@@ -64,7 +67,8 @@ Files that are not images (their URLs have /files/) are printed as they are;
 image flags are an error for them.
 
 Exit codes: 0 every input printed, 1 an input failed (the others are still
-printed), 2 usage or configuration error, 130 interrupted.
+printed) or the API key was rejected, 2 usage or configuration error, 130
+interrupted. A rejected or missing API key stops the run at the first key.
 ` + commonUsage
 
 const (
@@ -74,7 +78,9 @@ const (
 	maxURLLine = 1 << 20
 )
 
-var keyPattern = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+// keyLike matches a line that could be an API key given by mistake: it is
+// never echoed.
+var keyLike = regexp.MustCompile(`^[A-Za-z0-9_-]{20,}$`)
 
 // urlEdits is what the flags change in every URL.
 type urlEdits struct {
@@ -97,7 +103,6 @@ func (e urlEdits) apply(u *imgurl.URL) {
 	}
 }
 
-// urlFlags are the flags of "optimole url".
 type urlFlags struct {
 	width, height, resize, gravity, focus, quality, format, dpr string
 	download, reset                                             bool
@@ -237,7 +242,7 @@ func runURL(ctx context.Context, args []string, env Env) int {
 	// The first key connects inside a lookup, whose warnings would otherwise
 	// race the results written to stderr.
 	env.Stderr = &lockedWriter{w: env.Stderr}
-	run := &urlRun{env: env, common: &common, edits: edits}
+	run := &urlRun{env: env, common: &common, edits: edits, redact: common.resolve(env).redact}
 	return run.run(ctx, inputs, concurrency, jsonOut)
 }
 
@@ -299,10 +304,12 @@ func classify(line string) urlInput {
 		return urlInput{skip: true}
 	case strings.HasPrefix(s, "{"):
 		return classifyJSON(s)
-	case keyPattern.MatchString(s):
+	case api.IsAssetKey(s):
 		return urlInput{shown: s, key: strings.ToLower(s)}
 	case hasHTTPScheme(s):
 		return urlInput{shown: s, url: s}
+	case keyLike.MatchString(s):
+		return urlInput{shown: "(hidden)", err: errors.New("not an asset key or an Optimole URL; it looks like an API key, so it is not shown")}
 	}
 	return urlInput{shown: shorten(s), err: errors.New("not an asset key (32 hexadecimal characters) or an Optimole URL")}
 }
@@ -361,7 +368,9 @@ type urlResult struct {
 	err  error
 	code string
 	// fatal, when not zero, stops the run with this exit code after
-	// printing fatalMsg: no later input can succeed.
+	// printing fatalMsg. It is set when the API key is missing or rejected,
+	// which would fail every later key the same way; later inputs are not
+	// read.
 	fatal    int
 	fatalMsg string
 }
@@ -371,6 +380,7 @@ type urlRun struct {
 	env    Env
 	common *commonFlags
 	edits  urlEdits
+	redact redact.Redactor // hides the known API keys in what is printed
 
 	once    sync.Once
 	sess    *session
@@ -424,7 +434,17 @@ func (r *urlRun) run(ctx context.Context, inputs func(context.Context) (<-chan s
 		return ExitInterrupted
 	}
 	failed := 0
-	for ch := range results {
+	for {
+		var ch chan urlResult
+		var more bool
+		select {
+		case ch, more = <-results:
+		case <-ctx.Done():
+			return interrupted()
+		}
+		if !more {
+			break
+		}
 		var res urlResult
 		select {
 		case res = <-ch:
@@ -442,13 +462,13 @@ func (r *urlRun) run(ctx context.Context, inputs func(context.Context) (<-chan s
 		if res.err != nil {
 			failed++
 			if jsonOut {
-				enc.Encode(urlLine{Input: res.in.shown, Error: res.err.Error(), Code: res.code})
+				enc.Encode(urlLine{Input: r.redact.String(res.in.shown), Error: r.redact.String(res.err.Error()), Code: res.code})
 			} else {
-				fmt.Fprintf(r.env.Stderr, "optimole url: %s: %v\n", res.in.shown, res.err)
+				fmt.Fprintf(r.env.Stderr, "optimole url: %s: %s\n", r.printable(res.in.shown), r.printable(res.err.Error()))
 			}
 		} else if jsonOut {
 			enc.Encode(urlLine{
-				Input: res.in.shown, URL: res.url, Key: res.key, MimeType: res.in.mimeType,
+				Input: r.redact.String(res.in.shown), URL: res.url, Key: res.key, MimeType: res.in.mimeType,
 				OriginalWidth: res.in.width, OriginalHeight: res.in.height,
 			})
 		} else {
@@ -469,6 +489,16 @@ func (r *urlRun) run(ctx context.Context, inputs func(context.Context) (<-chan s
 		return ExitFailure
 	}
 	return ExitOK
+}
+
+// printable hides the known API keys in s and quotes it when it holds
+// control characters, which a terminal would otherwise act on.
+func (r *urlRun) printable(s string) string {
+	s = r.redact.String(s)
+	if strings.ContainsFunc(s, unicode.IsControl) {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 // urlLine is the JSON object printed for each input.
@@ -515,11 +545,12 @@ func (r *urlRun) resolve(ctx context.Context, in urlInput) urlResult {
 		return res
 	}
 	r.edits.apply(u)
-	res.url = u.String()
-	if res.key == "" {
-		res.key = in.key
+	if err := u.Validate(); err != nil {
+		res.err, res.code = err, codeInvalidInput
+		return res
 	}
-	if res.key == "" && keyPattern.MatchString(u.ID()) {
+	res.url = u.String()
+	if res.key == "" && api.IsAssetKey(u.ID()) {
 		res.key = strings.ToLower(u.ID())
 	}
 	return res

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // ErrNotOptimole is returned for URLs that are not Optimole delivery URLs.
@@ -62,16 +63,22 @@ type URL struct {
 // defaultImageOptions are the options of an image URL from the dashboard.
 var defaultImageOptions = []Option{{"w", "auto"}, {"h", "auto"}, {"q", "auto"}}
 
-// Parse splits an Optimole URL. The host must be an Optimole one, or the
-// path must hold an "id:" source or CDN options (custom domains).
+// Parse splits an Optimole URL. The host must be an Optimole one, or (for
+// custom domains) the path must hold an "id:" source or CDN options, or start
+// with the origin URL.
 func Parse(raw string) (*URL, error) {
 	s := strings.TrimSpace(raw)
+	// A URL never holds spaces or control characters; a newline would also
+	// turn one printed URL into two.
+	if strings.ContainsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		return nil, fmt.Errorf("%w: it contains spaces or control characters", ErrNotOptimole)
+	}
 	scheme, rest, ok := cutScheme(s)
 	if !ok {
 		return nil, fmt.Errorf("%w: it must start with https://", ErrNotOptimole)
 	}
 	host, path, _ := strings.Cut(rest, "/")
-	if host == "" || strings.ContainsAny(host, "@?#\\ \t") {
+	if host == "" || strings.ContainsAny(host, "@?#\\") {
 		return nil, fmt.Errorf("%w: invalid host %q", ErrNotOptimole, host)
 	}
 	path, suffix := cutSuffix(path)
@@ -96,7 +103,7 @@ func Parse(raw string) (*URL, error) {
 		}
 		u.extra = append(u.extra, seg)
 	}
-	if !isOptimoleHost(host) && len(u.options) == 0 && u.ID() == "" {
+	if !isOptimoleHost(host) && start > 0 && len(u.options) == 0 && u.ID() == "" {
 		return nil, fmt.Errorf("%w: %s is not an Optimole host and the path has no CDN options", ErrNotOptimole, host)
 	}
 	return u, nil
@@ -106,8 +113,9 @@ func Parse(raw string) (*URL, error) {
 // lower case.
 func cutScheme(s string) (scheme, rest string, ok bool) {
 	for _, sc := range []string{"https", "http"} {
-		if len(s) > len(sc)+3 && strings.EqualFold(s[:len(sc)+3], sc+"://") {
-			return sc, s[len(sc)+3:], true
+		prefix := sc + "://"
+		if len(s) > len(prefix) && strings.EqualFold(s[:len(prefix)], prefix) {
+			return sc, s[len(prefix):], true
 		}
 	}
 	return "", "", false
@@ -148,6 +156,25 @@ func (u *URL) ID() string {
 	}
 	id, _, _ := strings.Cut(rest, "/")
 	return id
+}
+
+// Validate reports a URL the CDN would misread. The CDN looks for options in
+// the whole path, the origin's own path included, so a segment there such as
+// "w:9" counts as an option unless the URL already sets that option before
+// the source.
+func (u *URL) Validate() error {
+	segs := strings.Split(u.source, "/")
+	for _, seg := range segs[1:] {
+		name, _, ok := strings.Cut(seg, ":")
+		if !ok || !(IsOption(name) || name == "id") {
+			continue
+		}
+		if _, set := u.Get(name); set || (name == "id" && u.ID() != "") {
+			continue
+		}
+		return fmt.Errorf("the origin path has %q, which the CDN reads as an option, so it would misread this URL", seg)
+	}
+	return nil
 }
 
 // Kind tells whether the URL is an image the CDN can transform.

@@ -48,6 +48,10 @@ const (
 
 var assetKeyPattern = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 
+// IsAssetKey reports whether s has the form of an asset key: 32 hexadecimal
+// characters.
+func IsAssetKey(s string) bool { return assetKeyPattern.MatchString(s) }
+
 // Options configures a Client.
 type Options struct {
 	// BaseURL is the API root, e.g. https://dashboard.optimole.com/api.

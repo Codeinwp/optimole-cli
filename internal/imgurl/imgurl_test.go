@@ -118,6 +118,12 @@ func TestParseReadsPartsLikeTheCDN(t *testing.T) {
 			out:     "https://cdn.example.com/w:640/https://example.com/a.jpg",
 		},
 		{
+			name: "a custom domain whose path starts with the origin URL",
+			raw:  "https://cdn.example.com/https://example.com/a.jpg",
+			kind: Image,
+			out:  "https://cdn.example.com/https://example.com/a.jpg",
+		},
+		{
 			name: "upper-case scheme",
 			raw:  "HTTPS://mlabc.i.optimole.com/id:" + hash + "/directUpload/a.jpg",
 			id:   hash,
@@ -156,6 +162,11 @@ func TestParseRefusesOtherURLs(t *testing.T) {
 		"https://mlabc.i.optimole.com/id:/directUpload/a.jpg",
 		"https://web.archive.org/web/2020/https://example.com/a.jpg",
 		"https://example.com/images/https://example.org/a.jpg",
+		// Spaces and control characters: a newline would print two URLs.
+		"https://mlabc.i.optimole.com/w:100/https://example.com/a.jpg\nhttps://evil.example/x",
+		"https://mlabc.i.optimole.com/w:100/https://example.com/a b.jpg",
+		"https://mlabc.i.optimole.com/w:100/https://example.com/a\tb.jpg",
+		"https://mlabc.i.optimole.com/w:100/https://example.com/a\x1b[31m.jpg",
 	} {
 		if u, err := Parse(raw); !errors.Is(err, ErrNotOptimole) {
 			t.Errorf("Parse(%q) = %v, %v; want ErrNotOptimole", raw, u, err)
@@ -200,6 +211,33 @@ func TestUnsetAndReset(t *testing.T) {
 	}
 }
 
+func TestValidateFindsOptionsTheCDNReadsInTheOriginPath(t *testing.T) {
+	tests := []struct {
+		raw string
+		bad bool
+	}{
+		{"https://mlabc.i.optimole.com/w:300/https://example.com/w:9/a.jpg", false}, // w is set: the CDN ignores w:9
+		{"https://mlabc.i.optimole.com/q:60/https://example.com/w:9/a.jpg", true},
+		{"https://mlabc.i.optimole.com/w:300/id:" + hash + "/https://example.com/bl:9/a.jpg", true},
+		{"https://mlabc.i.optimole.com/w:300/https://example.com/id:9/a.jpg", true},
+		{"https://mlabc.i.optimole.com/w:300/id:" + hash + "/directUpload/id:x/a.jpg", false},
+		{"https://mlabc.i.optimole.com/w:300/https://example.com:8443/x:9/a.jpg", false},
+		{libImage, false},
+	}
+	for _, tt := range tests {
+		err := mustParse(t, tt.raw).Validate()
+		if (err != nil) != tt.bad {
+			t.Errorf("Validate(%q) = %v, want an error: %v", tt.raw, err, tt.bad)
+		}
+	}
+	// Removing the option that shadowed it makes the URL one the CDN misreads.
+	u := mustParse(t, "https://mlabc.i.optimole.com/w:300/https://example.com/w:9/a.jpg")
+	u.Unset("w")
+	if u.Validate() == nil {
+		t.Fatal("Validate accepted a URL whose only w: is in the origin path")
+	}
+}
+
 func TestStringReparsesToTheSameURL(t *testing.T) {
 	for _, raw := range []string{
 		libImage,
@@ -238,6 +276,19 @@ func FuzzParse(f *testing.F) {
 		}
 		if !reflect.DeepEqual(u.Options(), v.Options()) || u.ID() != v.ID() || u.Kind() != v.Kind() {
 			t.Fatalf("reparsing %q changed it: %v %q %v -> %v %q %v", s, u.Options(), u.ID(), u.Kind(), v.Options(), v.ID(), v.Kind())
+		}
+		// An edited URL parses back with the edits.
+		v.Set("w", "123")
+		v.Unset("q")
+		e, err := Parse(v.String())
+		if err != nil {
+			t.Fatalf("the edited %q does not parse: %v", v.String(), err)
+		}
+		if w, _ := e.Get("w"); w != "123" {
+			t.Fatalf("edit lost: %q has w=%q", v.String(), w)
+		}
+		if _, ok := e.Get("q"); ok {
+			t.Fatalf("edit lost: %q still has q", v.String())
 		}
 	})
 }

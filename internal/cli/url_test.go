@@ -2,7 +2,10 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -255,6 +258,9 @@ func TestURLUsageErrors(t *testing.T) {
 		{"--set", "id:" + urlHash},
 		{"--set", "nocolon"},
 		{"--set", "bl:1/2"},
+		{"--set", "g:fp:0,1"},
+		{"--set", "cb:x:abc.d"},
+		{"--focus", "NaN:0"},
 		{"--width", "0"},
 		{"--width", ""},
 		{"--resize", "crop"},
@@ -309,5 +315,134 @@ func TestURLHelp(t *testing.T) {
 	}
 	if code := h.run("url", "-h"); code != ExitOK || !strings.Contains(h.stderr.String(), "--format F") {
 		t.Fatalf("exit %d, help: %s", code, h.stderr.String())
+	}
+}
+
+func TestURLInterruptedWhileStdinIsIdle(t *testing.T) {
+	h := newHarness(t)
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	h.stdin = pr
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	done := make(chan int, 1)
+	go func() { done <- h.runCtx(ctx, "url") }()
+	select {
+	case code := <-done:
+		if code != ExitInterrupted {
+			t.Fatalf("exit %d, want 130", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ctrl-C did not stop a run waiting for stdin")
+	}
+}
+
+func TestURLLimitsParallelLookups(t *testing.T) {
+	for _, limit := range []int{1, 2} {
+		h := newHarness(t).withKey()
+		var keys []string
+		for i := 0; i < 6; i++ {
+			keys = append(keys, h.srv.AddAsset(testserver.Asset{Filename: fmt.Sprintf("%d.jpg", i), ContentType: "image/jpeg"}))
+		}
+		var mu sync.Mutex
+		inside, most := 0, 0
+		// Each lookup waits until limit lookups are inside, so a limit that
+		// lets more through shows up as more at once.
+		h.srv.Hook = func(route testserver.Route, _ *http.Request) {
+			if route != testserver.RouteAsset {
+				return
+			}
+			mu.Lock()
+			inside++
+			most = max(most, inside)
+			mu.Unlock()
+			for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+				mu.Lock()
+				n := inside
+				mu.Unlock()
+				if n >= limit {
+					break
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+			mu.Lock()
+			inside--
+			mu.Unlock()
+		}
+		if code := h.run(append([]string{"url", "-c", strconv.Itoa(limit)}, keys...)...); code != ExitOK {
+			t.Fatalf("-c %d: exit %d: %s", limit, code, h.stderr.String())
+		}
+		if most != limit {
+			t.Fatalf("-c %d: at most %d lookups at once, want %d", limit, most, limit)
+		}
+	}
+}
+
+func TestURLReportsOutputFailures(t *testing.T) {
+	h := newHarness(t)
+	env := h.env()
+	env.Stdout = &failingWriter{}
+	if code := Run(context.Background(), []string{"url", urlImage, urlImage}, env); code != ExitFailure {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if !strings.Contains(h.stderr.String(), "writing output: no space left on device") {
+		t.Fatalf("stderr: %s", h.stderr.String())
+	}
+}
+
+func TestURLRefusesNewlinesInURLs(t *testing.T) {
+	h := newHarness(t)
+	injected := urlImage + "\nhttps://evil.example/x.jpg"
+	h.stdin = strings.NewReader(`{"url":"` + strings.ReplaceAll(injected, "\n", `\n`) + `"}` + "\n")
+	if code := h.run("url"); code != ExitFailure {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if h.stdout.Len() != 0 || strings.Contains(h.stderr.String(), "\nhttps://evil") {
+		t.Fatalf("stdout %q, stderr %q: the newline went through", h.stdout.String(), h.stderr.String())
+	}
+	if code := h.run("url", injected); code != ExitFailure || h.stdout.Len() != 0 {
+		t.Fatalf("argument: exit %d, stdout %q", code, h.stdout.String())
+	}
+}
+
+func TestURLDoesNotEchoAPIKeys(t *testing.T) {
+	h := newHarness(t)
+	secret := "my.saved.secret.key"
+	h.vars[config.EnvAPIKey] = secret
+	if code := h.run("url", secret, "https://example.com/x/"+secret, "--json"); code != ExitFailure {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if out := h.stdout.String() + h.stderr.String(); strings.Contains(out, secret) || !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("the configured key is printed:\n%s", out)
+	}
+	if code := h.run("url", secret, "https://example.com/x/"+secret); code != ExitFailure {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if out := h.stdout.String() + h.stderr.String(); strings.Contains(out, secret) || strings.Count(out, "[REDACTED]") != 2 {
+		t.Fatalf("the configured key is printed:\n%s", out)
+	}
+	scoped :="optml-s" + strings.Repeat("Ab3", 19)
+	if code := h.run("url", scoped); code != ExitFailure {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if strings.Contains(h.stderr.String(), scoped) || !strings.Contains(h.stderr.String(), "looks like an API key") {
+		t.Fatalf("stderr: %s", h.stderr.String())
+	}
+}
+
+func TestURLRefusesURLsTheCDNWouldMisread(t *testing.T) {
+	h := newHarness(t)
+	raw := "https://mlabc.i.optimole.com/w:300/https://example.com/w:9/a.jpg"
+	if code := h.run("url", raw, "--width", "100"); code != ExitOK {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	if code := h.run("url", raw, "--unset", "w", "--json"); code != ExitFailure {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if got := h.jsonLines()[0]; got["code"] != "invalid_input" || !strings.Contains(got["error"].(string), `"w:9"`) {
+		t.Fatalf("line = %v", got)
 	}
 }
