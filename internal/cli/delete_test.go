@@ -114,7 +114,7 @@ func TestDeleteKeysStopsAtTheFirstFailure(t *testing.T) {
 		for _, want := range []string{
 			"The following keys are invalid or unauthorized: " + strings.ToUpper(unknown) + " (HTTP 422)",
 			"Deleted 100 of 250 images before it stopped; the other 150 were not deleted.",
-			"Running the command again with the same keys is safe",
+			"To finish, run the command again without the first 100 keys: a deleted key counts as invalid if named again.",
 		} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("stderr lacks %q:\n%s", want, msg)
@@ -164,7 +164,7 @@ func TestDeleteKeysStopsAtTheFirstFailure(t *testing.T) {
 		if code := h.run("delete", "--keys", keysFile(t, strings.Repeat("cd", 16)), "--yes"); code != ExitFailure {
 			t.Fatalf("exit %d", code)
 		}
-		if msg := h.stderr.String(); !strings.Contains(msg, "Nothing was deleted.") || strings.Contains(msg, "Running the command again") {
+		if msg := h.stderr.String(); !strings.Contains(msg, "Nothing was deleted.") || strings.Contains(msg, "To finish") || strings.Contains(msg, "next run") {
 			t.Errorf("stderr:\n%s", msg)
 		}
 	})
@@ -654,18 +654,27 @@ func TestDeleteLongFolderPathAsksForTheName(t *testing.T) {
 	}
 }
 
-// TestDeleteRetriedKeysMayBeDeleted: a keys request whose first answer was
-// lost may have deleted, whatever the retries answered after it.
-func TestDeleteRetriedKeysMayBeDeleted(t *testing.T) {
+// TestDeleteKeysAfterALostAnswer: a keys request whose answer was lost may
+// have deleted. It is not repeated (the repeat would be refused for the keys
+// it deleted), and the command says what to do next.
+func TestDeleteKeysAfterALostAnswer(t *testing.T) {
 	h := newHarness(t).withKey()
 	keys := addAssets(h, 1)
-	tooMany := testserver.Response{Status: 429, Body: `{"message":"Too Many Attempts."}`}
-	h.srv.Inject(testserver.RouteDeleteAssets, testserver.Response{CommitThenClose: true}, tooMany, tooMany, tooMany)
+	h.srv.Inject(testserver.RouteDeleteAssets, testserver.Response{CommitThenClose: true})
 	if code := h.run("delete", "--keys", keysFile(t, keys...), "--yes", "--json"); code != ExitFailure {
 		t.Fatalf("exit %d", code)
 	}
-	if msg := h.stderr.String(); !strings.Contains(msg, "1 of 1 image may be deleted (the request failed).") || strings.Contains(msg, "Nothing was deleted") {
+	msg := h.stderr.String()
+	for _, want := range []string{"1 of 1 image may be deleted (the request failed).", "If the next run lists keys as invalid, the request that failed deleted them"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "Nothing was deleted") || strings.Contains(msg, "To finish") {
 		t.Errorf("stderr:\n%s", msg)
+	}
+	if n := len(deleteRequests(h)); n != 1 {
+		t.Errorf("%d requests, want 1", n)
 	}
 	if l := h.jsonLines(); len(l) != 1 || l[0]["deleted"] != float64(0) || l[0]["maybe_deleted"] != float64(1) {
 		t.Errorf("lines = %v", l)

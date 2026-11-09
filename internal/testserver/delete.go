@@ -16,7 +16,8 @@ import (
 // (every asset of its tree and, for a website's folder, the website's assets
 // in no folder) or "domain" (every asset of one of the account's websites).
 // The last two answer 202 with how many assets go; the dashboard deletes them
-// in the background, the fake at once. A deleted asset can be deleted again.
+// in the background, the fake at once. A deleted asset's key is refused like
+// an unknown one, as staging does.
 func (s *Server) handleDeleteAssets(w http.ResponseWriter, r *http.Request) {
 	ev, injected := s.begin(RouteDeleteAssets, r)
 	status := 0
@@ -102,7 +103,7 @@ func (s *Server) handleDeleteAssets(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			seen[upper] = true
-			if s.assets[strings.ToLower(k)] == nil {
+			if a := s.assets[strings.ToLower(k)]; a == nil || a.Deleted {
 				missing = append(missing, upper)
 			}
 		}

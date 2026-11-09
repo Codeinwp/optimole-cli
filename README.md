@@ -451,15 +451,16 @@ two folders share, is refused before anything is deleted; name the folder with `
 matched against the whole folder list: if the list does not come back whole, the command stops.
 
 - **Keys** are sent 100 per request (`DELETE /api/assets` with `{"keys": [...]}`) and deleted at once. The server
-  checks every key of a request first: if one is not the account's, it refuses the whole request (`422`, naming
-  the key) and deletes none of it. The run stops at the first request that fails; the images of the requests
-  before it stay deleted, and the command says how many. Running it again with the same keys is safe: deleted
-  images can be named again. A request whose answer is lost is repeated for the same reason.
+  checks every key of a request first: if one is not the account's, or is deleted already, it refuses the whole
+  request (`422`, naming the key) and deletes none of it. The run stops at the first request that fails; the
+  images of the requests before it stay deleted, and the command says how many keys to leave out to finish.
 - **A folder or a website** (`{"folder": ID}` or `{"domain": "example.com"}`) is emptied in the background: the
   server answers at once with how many images go (`202`), and they leave the library within a few minutes.
-  Images added afterwards are kept. This request is repeated only when the server cannot have received it (a
-  `429`, or a connection that failed before sending): a repeat would start a second deletion. When its answer is
-  lost, the command says the deletion may have started.
+  Images added afterwards are kept.
+- **Retries.** A delete request is repeated only when the server cannot have received it (a `429`, or a
+  connection that failed before sending). A repeat after a lost answer would start a second background deletion,
+  or be refused for the keys it deleted. When an answer is lost (or is a `5xx`), the command says the images may
+  be deleted, or the deletion may have started.
 
 Output:
 

@@ -384,7 +384,7 @@ func deleteKeys(ctx context.Context, env Env, sess *session, out io.Writer, enc 
 		}
 		end := min(deleted+api.MaxDeleteKeys, total)
 		if err = sess.client.DeleteAssets(ctx, t.keys[deleted:end]); err != nil {
-			if !keysUntouched(err) {
+			if !untouched(err) {
 				maybe = end - deleted
 			}
 			break
@@ -417,8 +417,13 @@ func deleteKeys(ctx context.Context, env Env, sess *session, out io.Writer, enc 
 	default:
 		fmt.Fprintln(env.Stderr, "Nothing was deleted.")
 	}
-	if deleted > 0 || maybe > 0 {
-		fmt.Fprintln(env.Stderr, "Running the command again with the same keys is safe: deleted images can be named again.")
+	// A deleted key counts as invalid if named again, and refuses its whole
+	// request: say which to leave out.
+	if deleted > 0 {
+		fmt.Fprintf(env.Stderr, "To finish, run the command again without the first %d keys: a deleted key counts as invalid if named again.\n", deleted)
+	}
+	if maybe > 0 {
+		fmt.Fprintln(env.Stderr, "If the next run lists keys as invalid, the request that failed deleted them; leave them out.")
 	}
 	return code
 }
@@ -440,7 +445,7 @@ func deleteInBackground(ctx context.Context, env Env, sess *session, out io.Writ
 	}
 	if err != nil {
 		code := deleteError(env, sess, err)
-		if !backgroundUntouched(err) {
+		if !untouched(err) {
 			fmt.Fprintln(env.Stderr, "The deletion may have started anyway: check the library in a few minutes before running the command again.")
 		}
 		return code
@@ -465,21 +470,13 @@ func deleteInBackground(ctx context.Context, env Env, sess *session, out io.Writ
 	return ExitOK
 }
 
-// keysUntouched reports a failure that proves a keys request deleted
-// nothing: a 4xx to its only attempt, as the dashboard checks the key, the
-// scope and the body before it deletes anything. Keys requests are repeated
-// after a lost answer, so after several attempts an earlier one may have
-// deleted; after no answer, a 5xx or Ctrl-C mid-request, the request may have.
-func keysUntouched(err error) bool {
-	var apiErr *api.Error
-	return errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 && apiErr.Attempts <= 1
-}
-
-// backgroundUntouched reports a failure that proves no background deletion
-// started: a 4xx, or no connection at all. These requests are repeated only
-// after failures that prove nothing started (see api.DeleteFolderAssets), so
-// earlier attempts did not start one either.
-func backgroundUntouched(err error) bool {
+// untouched reports a failed delete request that proves nothing was deleted:
+// a 4xx (the dashboard checks the key, the scope and the body before it
+// deletes anything), or no connection at all. Delete requests are repeated
+// only after such failures (see api.DeleteAssets), so earlier attempts did
+// nothing either. After a lost answer, a 5xx, a 2xx that does not read or
+// Ctrl-C mid-request, the request may have deleted.
+func untouched(err error) bool {
 	var apiErr *api.Error
 	var netErr *api.NetworkError
 	switch {

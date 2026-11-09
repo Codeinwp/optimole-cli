@@ -362,9 +362,9 @@ const (
 	// retryIdempotent is for calls that are safe to repeat (listing,
 	// completion): 429, 502, 503, 504 and any network error.
 	retryIdempotent retryMode = iota
-	// retryUncommitted is for calls a repeat would do twice: asset creation
-	// (a second reservation), starting an export, emptying a folder or a
-	// website. Only failures that prove nothing was done are retried: 429
+	// retryUncommitted is for calls a repeat would do twice, or answer
+	// differently: asset creation (a second reservation), starting an export,
+	// deleting assets (a deleted key is refused). Only failures that prove nothing was done are retried: 429
 	// (refused before the action), 503 with upload_service_unavailable (the
 	// server deletes the reservation before answering), and connection
 	// errors before the request was sent (DNS, dial, TLS handshake).

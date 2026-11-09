@@ -14,11 +14,13 @@ const OpDeleteAssets = "delete assets"
 const MaxDeleteKeys = 100
 
 // DeleteAssets deletes up to MaxDeleteKeys assets, named by their keys, at
-// once. The server checks every key first: one that is not the account's
-// refuses the whole request with a 422 naming it, and nothing is deleted.
+// once. The server checks every key first: one that is not the account's, or
+// is deleted already, refuses the whole request with a 422 naming it, and
+// nothing is deleted.
 //
-// It is retried like listing: the server answers a repeat with 204 again, as
-// a deleted asset can be deleted again.
+// It is retried like asset creation, only when the server cannot have
+// received it: a repeat after a lost answer would be refused for the keys it
+// deleted, and a deletion that worked would look failed.
 func (c *Client) DeleteAssets(ctx context.Context, keys []string) error {
 	if len(keys) == 0 || len(keys) > MaxDeleteKeys {
 		return fmt.Errorf("%s: %d keys given; one request takes 1 to %d", OpDeleteAssets, len(keys), MaxDeleteKeys)
@@ -33,7 +35,7 @@ func (c *Client) DeleteAssets(ctx context.Context, keys []string) error {
 	body := struct {
 		Keys []string `json:"keys"`
 	}{lower}
-	return c.doJSON(ctx, OpDeleteAssets, http.MethodDelete, c.endpoint("assets"), body, nil, retryIdempotent)
+	return c.doJSON(ctx, OpDeleteAssets, http.MethodDelete, c.endpoint("assets"), body, nil, retryUncommitted)
 }
 
 // DeleteFolderAssets starts deleting every asset of a folder and its

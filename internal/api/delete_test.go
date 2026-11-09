@@ -60,18 +60,34 @@ func sortedKeys(keys ...string) []string {
 	return keys
 }
 
-// TestDeleteAssetsIsRepeatedAfterALostAnswer: deleting keys again is
-// harmless, so a lost answer is retried.
-func TestDeleteAssetsIsRepeatedAfterALostAnswer(t *testing.T) {
+// TestDeleteAssetsIsNotRepeatedOnceItMayHaveDeleted: a deleted key is
+// refused when named again, so a repeat after a lost answer would make a
+// deletion that worked look failed. Only a 429 is repeated.
+func TestDeleteAssetsIsNotRepeatedOnceItMayHaveDeleted(t *testing.T) {
 	srv := testserver.New(t)
 	c, sl := newTestClient(t, srv.URL)
+	ctx := context.Background()
 	a := srv.AddAsset(testserver.Asset{Filename: "a.jpg"})
-	srv.Inject(testserver.RouteDeleteAssets, testserver.Response{CommitThenClose: true}, testserver.Response{Status: 503, Body: `{"message":"Service Unavailable"}`})
-	if err := c.DeleteAssets(context.Background(), []string{a}); err != nil {
+	srv.Inject(testserver.RouteDeleteAssets, testserver.Response{CommitThenClose: true})
+	var netErr *NetworkError
+	if err := c.DeleteAssets(ctx, []string{a}); !errors.As(err, &netErr) || !netErr.MaybeCommitted {
+		t.Fatalf("lost answer: %v", err)
+	}
+	if n := srv.Count(testserver.RouteDeleteAssets); n != 1 || len(srv.Deleted()) != 1 {
+		t.Fatalf("requests = %d, deleted = %v", n, srv.Deleted())
+	}
+	var apiErr *Error
+	if err := c.DeleteAssets(ctx, []string{a}); !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(err.Error(), strings.ToUpper(a)) {
+		t.Fatalf("a deleted key named again: %v", err)
+	}
+
+	b := srv.AddAsset(testserver.Asset{Filename: "b.jpg"})
+	srv.Inject(testserver.RouteDeleteAssets, testserver.Response{Status: 429, Body: `{"message":"Too Many Attempts."}`})
+	if err := c.DeleteAssets(ctx, []string{b}); err != nil {
 		t.Fatal(err)
 	}
-	if n := srv.Count(testserver.RouteDeleteAssets); n != 3 || len(sl.all()) != 2 || len(srv.Deleted()) != 1 {
-		t.Fatalf("requests = %d, sleeps = %d, deleted = %v", n, len(sl.all()), srv.Deleted())
+	if n := srv.Count(testserver.RouteDeleteAssets); n != 4 || len(sl.all()) != 1 {
+		t.Fatalf("requests = %d, sleeps = %d", n, len(sl.all()))
 	}
 }
 
