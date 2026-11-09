@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Codeinwp/optimole-cli/internal/api"
 	"github.com/Codeinwp/optimole-cli/internal/config"
 	"github.com/Codeinwp/optimole-cli/internal/testserver"
 )
@@ -684,6 +685,51 @@ func TestDeleteKeysAfterALostAnswer(t *testing.T) {
 	}
 }
 
+// TestDeleteKeysFailuresThatDeleteNothing: a keys request refused with a
+// 429 on every attempt, or never sent, deleted nothing, and says so.
+func TestDeleteKeysFailuresThatDeleteNothing(t *testing.T) {
+	check := func(t *testing.T, h *harness, code int, want string) {
+		t.Helper()
+		if code != ExitFailure {
+			t.Fatalf("exit %d: %s", code, h.stderr.String())
+		}
+		msg := h.stderr.String()
+		if !strings.Contains(msg, want) || !strings.Contains(msg, "Nothing was deleted.") || strings.Contains(msg, "may be deleted") || strings.Contains(msg, "next run") {
+			t.Errorf("stderr:\n%s", msg)
+		}
+		l := h.jsonLines()
+		if len(l) != 1 || l[0]["deleted"] != float64(0) {
+			t.Fatalf("lines = %v", l)
+		}
+		if _, ok := l[0]["maybe_deleted"]; ok {
+			t.Errorf("maybe_deleted: %v", l[0])
+		}
+	}
+	t.Run("rate limited on every attempt", func(t *testing.T) {
+		h := newHarness(t).withKey()
+		keys := addAssets(h, 2)
+		limited := make([]testserver.Response, api.MaxAttempts)
+		for i := range limited {
+			limited[i] = testserver.Response{Status: 429, Body: `{"message":"Too Many Attempts."}`}
+		}
+		h.srv.Inject(testserver.RouteDeleteAssets, limited...)
+		check(t, h, h.run("delete", "--keys", keysFile(t, keys...), "--yes", "--json"), "Too Many Attempts.")
+		if n := len(deleteRequests(h)); n != api.MaxAttempts {
+			t.Errorf("%d requests, want %d", n, api.MaxAttempts)
+		}
+		if n := len(h.srv.Deleted()); n != 0 {
+			t.Errorf("%d deleted", n)
+		}
+	})
+	t.Run("never connected", func(t *testing.T) {
+		h := newHarness(t).withKey()
+		env := h.env()
+		env.Transport = refusingTransport{}
+		code := Run(context.Background(), []string{"delete", "--keys", keysFile(t, strings.Repeat("ab", 16)), "--yes", "--json"}, env)
+		check(t, h, code, "connection refused")
+	})
+}
+
 // refusingTransport fails every request before it connects.
 type refusingTransport struct{}
 
@@ -801,7 +847,7 @@ func TestDeleteSiteSendsTheHost(t *testing.T) {
 	if req := deleteRequests(h); len(req) != 1 || req[0].Domain != "example.com" {
 		t.Fatalf("requests = %+v", req)
 	}
-	for _, site := range []string{"İ.com", "bücher.de", "https://www.", "www."} {
+	for _, site := range []string{"İ.com", "bücher.de", "WWW.", "https://Www.", "https://www.", "www."} {
 		if code := h.run("delete", "--site", site, "--yes"); code != ExitUsage {
 			t.Errorf("%s: exit %d: %s", site, code, h.stderr.String())
 		}

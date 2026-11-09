@@ -522,14 +522,18 @@ func siteHost(s string) (string, error) {
 		return "", errors.New("is not a domain")
 	}
 	u, err := url.Parse(s)
-	if err != nil || strings.TrimPrefix(u.Hostname(), "www.") == "" {
+	if err != nil {
 		return "", errors.New("is not a domain")
 	}
 	host := u.Hostname()
 	if strings.ContainsFunc(host, func(r rune) bool { return r >= utf8.RuneSelf }) {
 		return "", errors.New("is not in ASCII; give the domain in its xn-- form")
 	}
-	return strings.ToLower(host), nil
+	host = strings.ToLower(host)
+	if strings.TrimPrefix(host, "www.") == "" {
+		return "", errors.New("is not a domain")
+	}
+	return host, nil
 }
 
 // samePath reports whether a listed folder path reads as want, a normalized
