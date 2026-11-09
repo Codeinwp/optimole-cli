@@ -1,8 +1,9 @@
 // Package testserver is an in-memory fake of the dashboard's unified upload API
 // and of the presigned storage endpoint, for tests only. It follows the API
 // contract: POST /api/assets, PUT to the presigned URL, POST
-// /api/assets/{key}/completion, GET /api/folders, the /api/asset-exports
-// endpoints and GETs of the export archives.
+// /api/assets/{key}/completion, GET /api/assets/{key}, DELETE /api/assets,
+// GET /api/folders, the /api/asset-exports endpoints and GETs of the export
+// archives.
 package testserver
 
 import (
@@ -40,6 +41,8 @@ const (
 	RouteComplete Route = "complete"
 	RouteAsset    Route = "asset"
 	RouteFolders  Route = "folders"
+	// RouteDeleteAssets is DELETE /api/assets.
+	RouteDeleteAssets Route = "delete-assets"
 )
 
 // Response is a canned answer injected in front of the normal handling.
@@ -77,6 +80,8 @@ type Folder struct {
 	ID       int64
 	Name     string
 	ParentID int64 // 0 = root
+	// IsDefault marks a website's folder, named after its domain.
+	IsDefault bool
 }
 
 // Asset is an asset reserved through the fake.
@@ -96,6 +101,10 @@ type Asset struct {
 	// NoURL makes the asset's answer carry "url": null, as the dashboard
 	// does for a file that is not on the CDN yet.
 	NoURL bool
+	// Domain is the website the asset was offloaded from ("" for files
+	// uploaded straight to the library).
+	Domain  string
+	Deleted bool
 }
 
 // Event records one request the fake handled, with sequence numbers taken
@@ -113,6 +122,10 @@ type Event struct {
 	Query         string
 	// Range is the Range header of an archive download.
 	Range string
+	// Keys and Domain are what a DELETE /api/assets named (FolderID holds
+	// its folder).
+	Keys   []string
+	Domain string
 }
 
 // Server is the fake. Create it with New.
@@ -147,6 +160,7 @@ type Server struct {
 	mu          sync.Mutex
 	seq         int64
 	keys        map[string]Key
+	sites       map[string]bool
 	folders     []*Folder
 	nextFolder  int64
 	assets      map[string]*Asset
@@ -171,12 +185,13 @@ func New(t testing.TB) *Server {
 	t.Helper()
 	s := &Server{
 		keys:       map[string]Key{DefaultKey: {}},
+		sites:      map[string]bool{},
 		assets:     map[string]*Asset{},
 		injected:   map[Route][]Response{},
 		nextFolder: 100,
 	}
 	api := http.NewServeMux()
-	api.HandleFunc("/api/assets", s.handleCreate)
+	api.HandleFunc("/api/assets", s.handleAssets)
 	api.HandleFunc("/api/assets/", s.handleAssetPath)
 	api.HandleFunc("/api/folders", s.handleFolders)
 	api.HandleFunc("/api/asset-exports", s.handleExports)
@@ -228,6 +243,17 @@ func (s *Server) AddFolder(p string) int64 {
 		parent = f.ID
 	}
 	return parent
+}
+
+// AddSite adds a website to the account, with its folder (a root folder
+// named after the domain), and returns the folder's ID.
+func (s *Server) AddSite(domain string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sites[domain] = true
+	f := s.newFolderLocked(domain, 0)
+	f.IsDefault = true
+	return f.ID
 }
 
 // Inject queues canned answers for a route; each request pops one.
@@ -420,6 +446,15 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (Key, bool
 		return Key{}, false
 	}
 	return k, true
+}
+
+// handleAssets serves POST (create) and DELETE /api/assets.
+func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		s.handleDeleteAssets(w, r)
+		return
+	}
+	s.handleCreate(w, r)
 }
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -894,7 +929,7 @@ func (s *Server) handleFolders(w http.ResponseWriter, r *http.Request) {
 			p = f.ParentID
 		}
 		matched = append(matched, map[string]any{
-			"id": f.ID, "name": f.Name, "parent_id": p, "user_id": 1, "status": "active", "is_default": false,
+			"id": f.ID, "name": f.Name, "parent_id": p, "user_id": 1, "status": "active", "is_default": f.IsDefault,
 			"created_at": "2026-10-26T10:00:00.000000Z", "updated_at": "2026-10-26T10:00:00.000000Z",
 		})
 	}

@@ -240,7 +240,7 @@ func runURL(ctx context.Context, args []string, env Env) int {
 		if file, ok := env.Stdin.(*os.File); ok && termecho.IsTerminal(file) {
 			return usageError(env, "url", "give asset keys or URLs, or pipe them in")
 		}
-		inputs = func(ctx context.Context) (<-chan string, func() error) { return readLines(ctx, env.Stdin) }
+		inputs = func(ctx context.Context) (<-chan string, func() error) { return readLines(ctx, env.Stdin, "stdin") }
 	}
 
 	// The first key connects inside a lookup, whose warnings would otherwise
@@ -296,9 +296,9 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
-// readLines streams r line by line. The returned function gives the read
-// error, if any, once the channel is closed.
-func readLines(ctx context.Context, r io.Reader) (<-chan string, func() error) {
+// readLines streams r line by line; name says what r is in errors. The
+// returned function gives the read error, if any, once the channel is closed.
+func readLines(ctx context.Context, r io.Reader, name string) (<-chan string, func() error) {
 	ch := make(chan string)
 	var err error
 	go func() {
@@ -316,7 +316,7 @@ func readLines(ctx context.Context, r io.Reader) (<-chan string, func() error) {
 			if errors.Is(e, bufio.ErrTooLong) {
 				e = fmt.Errorf("a line is longer than %d bytes", maxURLLine)
 			}
-			err = fmt.Errorf("reading stdin: %w", e)
+			err = fmt.Errorf("reading %s: %w", name, e)
 		}
 	}()
 	// err is written before close(ch), and read only after it.

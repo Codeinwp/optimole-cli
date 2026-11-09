@@ -1,14 +1,15 @@
 # optimole
 
 `optimole` uploads local files into an [Optimole](https://optimole.com) media library, into the folders you
-choose, exports the library back as ZIP archives, and builds the CDN URLs of its images, resized or
-converted. It is a single binary with no dependencies.
+choose, exports the library back as ZIP archives, builds the CDN URLs of its images, resized or
+converted, and deletes images. It is a single binary with no dependencies.
 
 ```sh
 optimole login                                   # paste your API key once
 optimole upload -r ./photos --folder Campaigns   # photos/2024/a.jpg -> Campaigns/2024
 optimole export start                            # export the library, download ./optimole-export-ID
 optimole url KEY --width 800 --format webp       # the image's CDN URL, 800 px wide, as WebP
+optimole delete --folder Campaigns/2025          # delete every image of a folder (asks first)
 ```
 
 ## Install
@@ -70,7 +71,8 @@ the storage URL the file bytes go to.
 
 **Folder-scoped keys** (the ones starting with `optml-s`) work for uploads into the folders they were
 granted (and their subfolders): always pass `--folder` (or `--folder-id`). They cannot create folders
-(`folder_creation_forbidden`), upload into the library root (`folder_required`), list folders, or export.
+(`folder_creation_forbidden`), upload into the library root (`folder_required`), list folders, export, or
+delete.
 
 The API base URL defaults to `https://dashboard.optimole.com/api`; override it with `--api-url` or
 `OPTIMOLE_API_URL` (for example to try another environment). Only `https` URLs are
@@ -413,6 +415,64 @@ and `original_height`; a failed input gives `input`, `error` and `code` (`invali
 both answer `not_found`. A rejected API key stops the run. Messages never show the API keys in use (flag,
 environment or saved key), and a line that looks like an API key is not echoed at all.
 
+### `optimole delete`
+
+Deletes images from the library for good: the CDN stops serving them, so pages that still use them show broken
+images. Name the images with exactly one of:
+
+| Flag | Deletes |
+|---|---|
+| `--keys FILE` | The images whose asset keys are in `FILE`, one per line (`-` reads stdin). Blank lines and spaces around a key are ignored, and a key listed twice counts once. |
+| `--folder PATH` | Every image in this folder and all its subfolders, e.g. `Campaigns/2026` (the paths `optimole folders` prints; case does not matter). For a website's folder, also that website's images that are in no folder. |
+| `--folder-id N` | The same, naming the folder by its ID. |
+| `--site DOMAIN` | Every image of this website of the account, in any folder. `https://www.example.com/blog` means `example.com`. |
+
+| Flag | Meaning |
+|---|---|
+| `--yes` | Delete without asking. |
+| `--json` | Print the result as one JSON object. |
+| `--api-key`, `--api-url` | See [Authentication](#authentication). |
+
+```sh
+optimole delete --folder Campaigns/2025
+optimole delete --site example.com
+optimole delete --keys old-keys.txt
+printf '%s\n' KEY1 KEY2 | optimole delete --keys - --yes   # in a script: no question
+```
+
+Deleting needs a full-access API key; folder-scoped keys cannot delete. There are no approval codes: before
+deleting, the command says what it will delete and asks you to type the folder's path, the website's domain, or
+`delete` for keys. Any other answer, Ctrl-C or Ctrl-D deletes nothing. `--yes` skips the question; without a
+terminal to ask on (in a script, or with `--keys -`, where stdin carries the keys) the command refuses to run
+without `--yes`.
+
+Folders and websites are kept. A folder is looked up first (`GET /api/folders`), so an unknown folder, or a path
+two folders share, is refused before anything is deleted; name the folder with `--folder-id` then.
+
+- **Keys** are sent 100 per request (`DELETE /api/assets` with `{"keys": [...]}`) and deleted at once. The server
+  checks every key of a request first: if one is not the account's, it refuses the whole request (`422`, naming
+  the key) and deletes none of it. The run stops at the first request that fails; the images of the requests
+  before it stay deleted, and the command says how many. Running it again with the same keys is safe: deleted
+  images can be named again. A request whose answer is lost is repeated for the same reason.
+- **A folder or a website** (`{"folder": ID}` or `{"domain": "example.com"}`) is emptied in the background: the
+  server answers at once with how many images go (`202`), and they leave the library within a few minutes.
+  Images added afterwards are kept. This request is repeated only when the server cannot have received it (a
+  `429`, or a connection that failed before sending): a repeat would start a second deletion. When its answer is
+  lost, the command says the deletion may have started.
+
+Output:
+
+```text
+Deleted 250 images.
+Deleting 1520 images in the background. They leave the library within a few minutes.
+Nothing to delete: the folder "Campaigns/2025" has no images.
+```
+
+With `--json`, one object: `{"scope":"keys","requested":250,"deleted":250}` for keys (after a failure also
+`error`, and `maybe_deleted` when the outcome of the failed request is unknown), and
+`{"scope":"folder","folder_id":15,"folder":"Campaigns/2025","deleting":1520}` or
+`{"scope":"site","domain":"example.com","deleting":1520}` for a folder or a website.
+
 ### `optimole login`, `optimole logout`
 
 `login` reads the key from stdin: type or paste it at the prompt, or pipe it (`optimole login < key.txt`;
@@ -429,9 +489,9 @@ Prints the version, commit and build date.
 
 | Code | Meaning |
 |---|---|
-| 0 | Every selected file was uploaded (skipped files do not count). For `export start` and `export download`: the export completed and every selected archive is on disk (`export start --no-wait`: the export was started, or one was already running). For `url`: every input was printed. |
-| 1 | At least one file failed, there was nothing to upload, or the output could not be written. For exports: the export failed or was cancelled, an archive failed, `--timeout` passed, or the account keeps the most exports it may. For `url`: an input failed (the others are still printed), or the API key was rejected. |
-| 2 | Usage or configuration error (bad flags, a directory without `-r`, an unknown `--domain`, missing key, non-https URL). Nothing was uploaded or downloaded. For `url`, a missing key stops the run at the first asset key. |
+| 0 | Every selected file was uploaded (skipped files do not count). For `export start` and `export download`: the export completed and every selected archive is on disk (`export start --no-wait`: the export was started, or one was already running). For `url`: every input was printed. For `delete`: the images were deleted (a folder or a website: are being deleted). |
+| 1 | At least one file failed, there was nothing to upload, or the output could not be written. For exports: the export failed or was cancelled, an archive failed, `--timeout` passed, or the account keeps the most exports it may. For `url`: an input failed (the others are still printed), or the API key was rejected. For `delete`: the folder was not found, the API refused or failed, or the typed answer did not match. |
+| 2 | Usage or configuration error (bad flags, a directory without `-r`, an unknown `--domain`, missing key, non-https URL, `delete` without `--yes` and without a terminal). Nothing was uploaded, downloaded or deleted. For `url`, a missing key stops the run at the first asset key. |
 | 130 | Interrupted with Ctrl-C. |
 
 ## Limits
@@ -443,6 +503,7 @@ Prints the version, commit and build date.
   and each key given to `optimole url` one, so very large batches may see `429` answers, which the CLI waits
   out. URLs given to `optimole url` take none.
 - A presigned upload URL is valid for 15 minutes.
+- `optimole delete --keys` sends 100 keys per request.
 - An account runs one export at a time and keeps at most 5. Export archives are about 1 GB each (a part can be
   larger when its first files are), and their download URLs are valid for a day.
 

@@ -39,6 +39,8 @@ type harness struct {
 	cfgDir string
 	vars   map[string]string
 	stdin  io.Reader
+	// tty makes stdin count as an interactive terminal.
+	tty    bool
 	stdout bytes.Buffer
 	stderr bytes.Buffer
 }
@@ -67,10 +69,11 @@ func (h *harness) env() Env {
 			defer mu.Unlock()
 			return h.vars[k]
 		},
-		UserConfigDir: func() (string, error) { return h.cfgDir, nil },
-		Build:         BuildInfo{Version: "1.2.3", Commit: "abc1234", Date: "2026-10-26"},
-		Transport:     localOnly{h.t},
-		Sleep:         func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
+		UserConfigDir:   func() (string, error) { return h.cfgDir, nil },
+		Build:           BuildInfo{Version: "1.2.3", Commit: "abc1234", Date: "2026-10-26"},
+		Transport:       localOnly{h.t},
+		Sleep:           func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
+		StdinIsTerminal: func() bool { return h.tty },
 	}
 }
 
