@@ -425,7 +425,7 @@ images. Name the images with exactly one of:
 | `--keys FILE` | The images whose asset keys are in `FILE`, one per line (`-` reads stdin). Blank lines and spaces around a key are ignored, and a key listed twice counts once. |
 | `--folder PATH` | Every image in this folder and all its subfolders, e.g. `Campaigns/2026` (the paths `optimole folders` prints; case does not matter). For a website's folder, also that website's images that are in no folder. |
 | `--folder-id N` | The same, naming the folder by its ID. |
-| `--site DOMAIN` | Every image of this website of the account, in any folder. `https://www.example.com/blog` means `example.com`. |
+| `--site DOMAIN` | Every image of this website of the account, in any folder. `https://www.example.com/blog` means `example.com`. An internationalized domain must be given in its `xn--` form. |
 
 | Flag | Meaning |
 |---|---|

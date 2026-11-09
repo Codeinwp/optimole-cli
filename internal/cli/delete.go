@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/Codeinwp/optimole-cli/internal/api"
 	"github.com/Codeinwp/optimole-cli/internal/output"
@@ -38,7 +39,8 @@ one of:
                    "Campaigns/2026" (see "optimole folders"). For a website's
                    folder, also the website's images that are in no folder.
   --folder-id N    The same, naming the folder by its ID.
-  --site DOMAIN    Every image of this website of the account, in any folder.
+  --site DOMAIN    Every image of this website of the account, in any folder
+                   (an internationalized domain in its xn-- form).
 
 Folders and websites are kept. A folder or a website is emptied in the
 background: the command returns at once with how many images go, and they
@@ -71,9 +73,10 @@ type deleteTarget struct {
 	folderID int64
 	folder   string // the folder's path
 	website  bool   // the folder is a website's
-	// site is the --site value, sent as given: the server reads it the way
-	// siteDomain does, into domain. Sending domain instead would have the
-	// server strip a second "www.".
+	// site is the --site value, then its host in lower case: what is sent.
+	// The server strips one "www." from it, into domain, as the prompt does.
+	// Sending domain would have the server strip a second "www.", and sending
+	// the whole URL could pass its 255-character limit.
 	site   string
 	domain string
 }
@@ -155,10 +158,11 @@ func runDelete(ctx context.Context, args []string, env Env) int {
 			return usageError(env, name, "--folder-id: %s", shown(red, err.Error()))
 		}
 	default:
-		t.site = strings.TrimSpace(t.site)
-		if t.domain = siteDomain(t.site); t.domain == "" {
-			return usageError(env, name, "--site: %s is not a domain", strconv.Quote(red.String(t.site)))
+		var host string
+		if host, err = siteHost(t.site); err != nil {
+			return usageError(env, name, "--site: %s %v", strconv.Quote(red.String(t.site)), err)
 		}
+		t.site, t.domain = host, strings.TrimPrefix(host, "www.")
 	}
 	if !yes && !env.interactive() {
 		return usageError(env, name, "stdin is not a terminal, so the deletion cannot be confirmed; add --yes to delete without asking")
@@ -295,7 +299,7 @@ func findFolder(ctx context.Context, env Env, sess *session, t *deleteTarget, wa
 	paths := folderPaths(folders)
 	found := map[int64]api.Folder{}
 	for _, f := range folders {
-		if (t.folderID > 0 && f.ID == t.folderID) || (want != "" && strings.EqualFold(paths[f.ID], want)) {
+		if (t.folderID > 0 && f.ID == t.folderID) || (want != "" && samePath(paths[f.ID], want)) {
 			found[f.ID] = f
 		}
 	}
@@ -506,21 +510,37 @@ func deleteError(env Env, sess *session, err error) int {
 	return ExitFailure
 }
 
-// siteDomain reads a website's domain the way the dashboard does: the host of
-// a URL or of a bare domain, in lower case and without one "www.". It returns
-// "" when there is none.
-func siteDomain(s string) string {
+// siteHost reads the host of a URL or of a bare domain, in lower case, the
+// way the dashboard does before it strips one "www.". Only ASCII hosts are
+// taken: the dashboard maps the others with IDNA, which the standard library
+// lacks, so the domain shown could differ from the one deleted.
+func siteHost(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if !strings.Contains(s, "://") {
 		s = "https://" + s
 	} else if !hasHTTPScheme(s) {
-		return ""
+		return "", errors.New("is not a domain")
 	}
 	u, err := url.Parse(s)
-	if err != nil {
-		return ""
+	if err != nil || strings.TrimPrefix(u.Hostname(), "www.") == "" {
+		return "", errors.New("is not a domain")
 	}
-	return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+	host := u.Hostname()
+	if strings.ContainsFunc(host, func(r rune) bool { return r >= utf8.RuneSelf }) {
+		return "", errors.New("is not in ASCII; give the domain in its xn-- form")
+	}
+	return strings.ToLower(host), nil
+}
+
+// samePath reports whether a listed folder path reads as want, a normalized
+// path: a folder whose name holds a slash ("2026 / Drafts") reads the same as
+// the nested folders it looks like, and counts as a match, so the two are
+// told apart by ID.
+func samePath(listed, want string) bool {
+	if n, err := upload.NormalizeFolderPath(listed); err == nil {
+		listed = n
+	}
+	return strings.EqualFold(listed, want)
 }
 
 // images says "1 image" or "N images".

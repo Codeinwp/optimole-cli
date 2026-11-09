@@ -264,8 +264,8 @@ func TestDeleteSite(t *testing.T) {
 	if len(l) != 1 || l[0]["scope"] != "site" || l[0]["domain"] != "example.com" || l[0]["deleting"] != float64(2) {
 		t.Fatalf("lines = %v", l)
 	}
-	// Sent as given: the server reads it the way the prompt showed it.
-	if req := deleteRequests(h); len(req) != 1 || req[0].Domain != "https://WWW.Example.com/blog" {
+	// The host goes, with its "www.": the server strips one, as the prompt did.
+	if req := deleteRequests(h); len(req) != 1 || req[0].Domain != "www.example.com" {
 		t.Fatalf("requests = %+v", req)
 	}
 	if n := len(h.srv.Events()); n != 1 {
@@ -785,6 +785,51 @@ func TestDeleteFolderNeedsTheWholeList(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, h.stderr.String())
 	}
 	if n := len(deleteRequests(h)); n != 1 {
+		t.Fatalf("%d delete requests", n)
+	}
+}
+
+// TestDeleteSiteSendsTheHost: only the host goes, so a long URL stays under
+// the server's 255-character limit, and a domain the CLI cannot map as the
+// server does (IDNA) is refused rather than shown wrong.
+func TestDeleteSiteSendsTheHost(t *testing.T) {
+	h := newHarness(t).withKey()
+	h.srv.AddSite("example.com")
+	if code := h.run("delete", "--site", "https://Example.com/"+strings.Repeat("p", 300), "--yes"); code != ExitOK {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	if req := deleteRequests(h); len(req) != 1 || req[0].Domain != "example.com" {
+		t.Fatalf("requests = %+v", req)
+	}
+	for _, site := range []string{"İ.com", "bücher.de", "https://www.", "www."} {
+		if code := h.run("delete", "--site", site, "--yes"); code != ExitUsage {
+			t.Errorf("%s: exit %d: %s", site, code, h.stderr.String())
+		}
+	}
+	if !strings.Contains(h.stderr.String(), `"www." is not a domain`) {
+		t.Errorf("stderr: %s", h.stderr.String())
+	}
+	h.run("delete", "--site", "bücher.de", "--yes")
+	if !strings.Contains(h.stderr.String(), "give the domain in its xn-- form") {
+		t.Errorf("stderr: %s", h.stderr.String())
+	}
+	if n := len(deleteRequests(h)); n != 1 {
+		t.Fatalf("%d delete requests", n)
+	}
+}
+
+// TestDeleteFolderLookAlikePaths: a root folder named "2026 / Drafts" reads
+// as the nested 2026/Drafts, so neither is guessed.
+func TestDeleteFolderLookAlikePaths(t *testing.T) {
+	h := newHarness(t).withKey()
+	h.srv.Inject(testserver.RouteFolders, testserver.Response{Status: 200, Body: `{"data":[` +
+		`{"id":5,"name":"2026 / Drafts","parent_id":null,"status":"active","is_default":false},` +
+		`{"id":6,"name":"2026","parent_id":null,"status":"active","is_default":false},` +
+		`{"id":7,"name":"Drafts","parent_id":6,"status":"active","is_default":false}],"meta":{"next_cursor":null,"has_more":false}}`})
+	if code := h.run("delete", "--folder", "2026 / Drafts", "--yes"); code != ExitFailure || !strings.Contains(h.stderr.String(), `2 folders have the path "2026/Drafts" (IDs 5, 7)`) {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	if n := len(deleteRequests(h)); n != 0 {
 		t.Fatalf("%d delete requests", n)
 	}
 }
