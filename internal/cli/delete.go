@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,9 +45,10 @@ background: the command returns at once with how many images go, and they
 leave the library within a few minutes.
 
 First the command says what it will delete and asks you to type the folder's
-path, the website's domain, or "delete" for keys. --yes skips the question.
-Without a terminal to ask on (in scripts, or with --keys -), it deletes only
-with --yes. Deleting needs a full-access API key.
+path (its name, for a path too long to type), the website's domain, or
+"delete" for keys, then Enter. --yes skips the question. Without a terminal to
+ask on (in scripts, or with --keys -), it deletes only with --yes. Deleting
+needs a full-access API key.
 
 Flags:
   --yes    Delete without asking
@@ -58,6 +60,10 @@ was not found, the API refused or failed, or the typed answer did not match,
 interrupted.
 `
 
+// maxAnswer is the longest answer the question asks to type: a terminal line
+// holds 1024 bytes on macOS. A longer folder path is confirmed by its name.
+const maxAnswer = 1000
+
 // deleteTarget is what "optimole delete" deletes: keys, a folder or a website.
 type deleteTarget struct {
 	keys     []string // lower case, each once
@@ -65,7 +71,11 @@ type deleteTarget struct {
 	folderID int64
 	folder   string // the folder's path
 	website  bool   // the folder is a website's
-	domain   string
+	// site is the --site value, sent as given: the server reads it the way
+	// siteDomain does, into domain. Sending domain instead would have the
+	// server strip a second "www.".
+	site   string
+	domain string
 }
 
 // keysLine is the JSON of a deletion by keys.
@@ -96,12 +106,12 @@ func runDelete(ctx context.Context, args []string, env Env) int {
 	common.register(fs, true)
 	fs.SetOutput(flagErrorWriter{w: env.Stderr})
 	var t deleteTarget
-	var folderPath, folderIDRaw, site string
+	var folderPath, folderIDRaw string
 	var yes, jsonOut bool
 	fs.StringVar(&t.keysFrom, "keys", "", "")
 	fs.StringVar(&folderPath, "folder", "", "")
 	fs.StringVar(&folderIDRaw, "folder-id", "", "")
-	fs.StringVar(&site, "site", "", "")
+	fs.StringVar(&t.site, "site", "", "")
 	fs.BoolVar(&yes, "yes", false, "")
 	fs.BoolVar(&jsonOut, "json", false, "")
 	rest, err := parseArgs(fs, args)
@@ -135,18 +145,19 @@ func runDelete(ctx context.Context, args []string, env Env) int {
 		}
 	case set["folder"]:
 		if folderPath, err = upload.NormalizeFolderPath(folderPath); err != nil {
-			return usageError(env, name, "--folder: %s", red.String(err.Error()))
+			return usageError(env, name, "--folder: %s", shown(red, err.Error()))
 		}
 		if folderPath == "" {
 			return usageError(env, name, "--folder must name a folder; the library root is not one")
 		}
 	case set["folder-id"]:
 		if t.folderID, err = parseFolderID(folderIDRaw); err != nil {
-			return usageError(env, name, "--folder-id: %s", red.String(err.Error()))
+			return usageError(env, name, "--folder-id: %s", shown(red, err.Error()))
 		}
 	default:
-		if t.domain = siteDomain(site); t.domain == "" {
-			return usageError(env, name, "--site: %s is not a domain", strconv.Quote(red.String(site)))
+		t.site = strings.TrimSpace(t.site)
+		if t.domain = siteDomain(t.site); t.domain == "" {
+			return usageError(env, name, "--site: %s is not a domain", strconv.Quote(red.String(t.site)))
 		}
 	}
 	if !yes && !env.interactive() {
@@ -169,7 +180,7 @@ func runDelete(ctx context.Context, args []string, env Env) int {
 		}
 	}
 	if !yes {
-		if code := confirmDelete(ctx, env, &t); code != ExitOK {
+		if code := confirmDelete(ctx, env, sess.redact, &t); code != ExitOK {
 			return code
 		}
 	}
@@ -193,15 +204,22 @@ func runDelete(ctx context.Context, args []string, env Env) int {
 // red hides the known API keys in errors, which name the file.
 func readDeleteKeys(ctx context.Context, env Env, red redact.Redactor, t *deleteTarget) int {
 	const name = "delete"
+	interrupted := func() int {
+		fmt.Fprintf(env.Stderr, "optimole %s: interrupted; nothing was deleted\n", name)
+		return ExitInterrupted
+	}
 	var r io.Reader = env.Stdin
 	src := "stdin"
 	if t.keysFrom != "-" {
-		f, err := os.Open(t.keysFrom)
+		f, err := openContext(ctx, t.keysFrom)
+		if ctx.Err() != nil {
+			return interrupted()
+		}
 		if err != nil {
-			return usageError(env, name, "--keys: %s", red.Error(err))
+			return usageError(env, name, "--keys: %s", shown(red, err.Error()))
 		}
 		defer f.Close()
-		r, src = f, shownText(red.String(t.keysFrom))
+		r, src = f, shown(red, t.keysFrom)
 	}
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -233,11 +251,10 @@ func readDeleteKeys(ctx context.Context, env Env, red redact.Redactor, t *delete
 		}
 	}
 	if ctx.Err() != nil {
-		fmt.Fprintf(env.Stderr, "optimole %s: interrupted; nothing was deleted\n", name)
-		return ExitInterrupted
+		return interrupted()
 	}
 	if err := readErr(); err != nil {
-		return usageError(env, name, "--keys: %s", red.Error(err))
+		return usageError(env, name, "--keys: %s", shown(red, err.Error()))
 	}
 	if len(t.keys) == 0 {
 		return usageError(env, name, "--keys: no asset keys in %s", src)
@@ -245,36 +262,61 @@ func readDeleteKeys(ctx context.Context, env Env, red redact.Redactor, t *delete
 	return ExitOK
 }
 
+// openContext opens a file for reading and gives up when ctx is done: opening
+// a FIFO waits for a writer. The open left behind ends with the process.
+func openContext(ctx context.Context, name string) (*os.File, error) {
+	type opened struct {
+		f   *os.File
+		err error
+	}
+	ch := make(chan opened, 1)
+	go func() {
+		f, err := os.Open(name)
+		ch <- opened{f, err}
+	}()
+	select {
+	case o := <-ch:
+		return o.f, o.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // findFolder looks the folder up, by ID or by path, in the folder list: for
 // its path, shown and typed to confirm, and to refuse a folder that is not
-// there, or a path two folders share, before anything is deleted.
-func findFolder(ctx context.Context, env Env, sess *session, t *deleteTarget, path string) int {
-	folders, err := listAllFolders(ctx, sess.client, "")
+// there, or a path two folders share, before anything is deleted. A path is
+// matched only against a whole list, so a duplicate cannot hide in the part
+// that did not come back.
+func findFolder(ctx context.Context, env Env, sess *session, t *deleteTarget, want string) int {
+	folders, complete, err := listAllFolders(ctx, sess.client, "")
 	if err != nil {
 		return deleteError(env, sess, err)
 	}
 	paths := folderPaths(folders)
 	found := map[int64]api.Folder{}
 	for _, f := range folders {
-		if (t.folderID > 0 && f.ID == t.folderID) || (path != "" && strings.EqualFold(paths[f.ID], path)) {
+		if (t.folderID > 0 && f.ID == t.folderID) || (want != "" && strings.EqualFold(paths[f.ID], want)) {
 			found[f.ID] = f
 		}
 	}
-	if len(found) == 0 {
-		what := fmt.Sprintf("the ID %d", t.folderID)
-		if path != "" {
-			what = "the path " + strconv.Quote(path)
-		}
+	what := fmt.Sprintf("the ID %d", t.folderID)
+	if want != "" {
+		what = "the path " + strconv.Quote(sess.redact.String(want))
+	}
+	switch {
+	case !complete && (want != "" || len(found) == 0):
+		fmt.Fprintf(env.Stderr, "optimole delete: the folder list came back incomplete (%d folders), so the folder with %s cannot be told apart for sure; nothing was deleted\n", len(folders), what)
+		return ExitFailure
+	case len(found) == 0:
 		fmt.Fprintf(env.Stderr, "optimole delete: no folder has %s (\"optimole folders\" lists them)\n", what)
 		return ExitFailure
-	}
-	if len(found) > 1 {
+	case len(found) > 1:
 		ids := make([]string, 0, len(found))
 		for id := range found {
 			ids = append(ids, strconv.FormatInt(id, 10))
 		}
 		sort.Strings(ids)
-		fmt.Fprintf(env.Stderr, "optimole delete: %d folders have the path %q (IDs %s); name one with --folder-id\n", len(found), path, strings.Join(ids, ", "))
+		fmt.Fprintf(env.Stderr, "optimole delete: %d folders have %s (IDs %s); name one with --folder-id\n", len(found), what, strings.Join(ids, ", "))
 		return ExitFailure
 	}
 	for id, f := range found {
@@ -284,27 +326,33 @@ func findFolder(ctx context.Context, env Env, sess *session, t *deleteTarget, pa
 }
 
 // confirmDelete says what is about to go and asks for the folder's path, the
-// website's domain or "delete" to be typed; any other answer aborts.
-func confirmDelete(ctx context.Context, env Env, t *deleteTarget) int {
+// website's domain or "delete" to be typed, then Enter; any other answer, or
+// none, aborts. red hides the known API keys in what is shown: an answer that
+// holds one cannot be typed from the prompt, which leaves --yes.
+func confirmDelete(ctx context.Context, env Env, red redact.Redactor, t *deleteTarget) int {
 	var what, answer string
 	switch {
 	case t.keys != nil:
-		what = fmt.Sprintf("%s (the keys in %s)", images(int64(len(t.keys))), shownText(t.keysFrom))
+		what = fmt.Sprintf("%s (the keys in %s)", images(int64(len(t.keys))), shown(red, t.keysFrom))
 		answer = "delete"
 	case t.domain != "":
-		what = fmt.Sprintf("every image of the website %s, in any folder", t.domain)
+		what = fmt.Sprintf("every image of the website %s, in any folder", shown(red, t.domain))
 		answer = t.domain
 	default:
-		what = fmt.Sprintf("every image in the folder %q (ID %d) and its subfolders", t.folder, t.folderID)
+		what = fmt.Sprintf("every image in the folder %q (ID %d) and its subfolders", red.String(t.folder), t.folderID)
 		if t.website {
-			what += fmt.Sprintf(", and the images of the website %s that are in no folder", shownText(t.folder))
+			what += fmt.Sprintf(", and the images of the website %s that are in no folder", shown(red, t.folder))
 		}
 		what += "; the folders are kept"
 		answer = t.folder
+		if len(answer) > maxAnswer {
+			answer = path.Base(t.folder)
+		}
 	}
-	fmt.Fprintf(env.Stderr, "About to delete %s. This cannot be undone: the CDN stops serving the images.\nType %q to confirm: ", what, answer)
+	fmt.Fprintf(env.Stderr, "About to delete %s. This cannot be undone: the CDN stops serving the images.\nType %q to confirm: ", what, red.String(answer))
 	line, err := readOneLine(ctx, env.Stdin, false, "the answer")
-	if !strings.HasSuffix(line, "\n") {
+	complete := strings.HasSuffix(line, "\n")
+	if !complete {
 		// Ctrl-C or Ctrl-D left the cursor after the prompt.
 		fmt.Fprintln(env.Stderr)
 	}
@@ -313,9 +361,11 @@ func confirmDelete(ctx context.Context, env Env, t *deleteTarget) int {
 		fmt.Fprintln(env.Stderr, "optimole delete: interrupted; nothing was deleted")
 		return ExitInterrupted
 	case err != nil:
-		fmt.Fprintf(env.Stderr, "optimole delete: %v; nothing was deleted\n", err)
+		fmt.Fprintf(env.Stderr, "optimole delete: %s; nothing was deleted\n", shown(red, err.Error()))
 		return ExitFailure
-	case strings.TrimSpace(line) != answer:
+	case !complete || strings.TrimSpace(line) != answer:
+		// An answer that ends without Enter (Ctrl-D, or a line too long to
+		// be read whole) is no answer.
 		fmt.Fprintln(env.Stderr, "optimole delete: the answer did not match; nothing was deleted")
 		return ExitFailure
 	}
@@ -334,7 +384,7 @@ func deleteKeys(ctx context.Context, env Env, sess *session, out io.Writer, enc 
 		}
 		end := min(deleted+api.MaxDeleteKeys, total)
 		if err = sess.client.DeleteAssets(ctx, t.keys[deleted:end]); err != nil {
-			if !refusedBeforeDeleting(err) {
+			if !keysUntouched(err) {
 				maybe = end - deleted
 			}
 			break
@@ -351,15 +401,19 @@ func deleteKeys(ctx context.Context, env Env, sess *session, out io.Writer, enc 
 		return ExitOK
 	}
 	code := deleteError(env, sess, err)
+	other := total - deleted - maybe
 	switch {
 	case maybe > 0:
-		msg := fmt.Sprintf("Deleted %d of %d images before it stopped; the next %d may be deleted too (their request failed)", deleted, total, maybe)
-		if other := total - deleted - maybe; other > 0 {
+		msg := fmt.Sprintf("Deleted %d of %s before it stopped; %d more may be deleted too (the request failed)", deleted, images(int64(total)), maybe)
+		if deleted == 0 {
+			msg = fmt.Sprintf("%d of %s may be deleted (the request failed)", maybe, images(int64(total)))
+		}
+		if other > 0 {
 			msg += fmt.Sprintf(", the other %d were not", other)
 		}
 		fmt.Fprintln(env.Stderr, msg+".")
 	case deleted > 0:
-		fmt.Fprintf(env.Stderr, "Deleted %d of %d images before it stopped; the other %d were not deleted.\n", deleted, total, total-deleted)
+		fmt.Fprintf(env.Stderr, "Deleted %d of %s before it stopped; the other %d were not deleted.\n", deleted, images(int64(total)), other)
 	default:
 		fmt.Fprintln(env.Stderr, "Nothing was deleted.")
 	}
@@ -376,18 +430,17 @@ func deleteInBackground(ctx context.Context, env Env, sess *session, out io.Writ
 	var line backgroundLine
 	var where string
 	if t.domain != "" {
-		n, err = sess.client.DeleteSiteAssets(ctx, t.domain)
-		line = backgroundLine{Scope: "site", Domain: t.domain}
-		where = "the website " + t.domain
+		n, err = sess.client.DeleteSiteAssets(ctx, t.site)
+		line = backgroundLine{Scope: "site", Domain: sess.redact.String(t.domain)}
+		where = "the website " + shown(sess.redact, t.domain)
 	} else {
 		n, err = sess.client.DeleteFolderAssets(ctx, t.folderID)
-		line = backgroundLine{Scope: "folder", FolderID: t.folderID, Folder: t.folder}
-		where = "the folder " + strconv.Quote(t.folder)
+		line = backgroundLine{Scope: "folder", FolderID: t.folderID, Folder: sess.redact.String(t.folder)}
+		where = "the folder " + strconv.Quote(sess.redact.String(t.folder))
 	}
 	if err != nil {
 		code := deleteError(env, sess, err)
-		if !refusedBeforeDeleting(err) {
-			// Not repeated (see api.DeleteFolderAssets), so it is unknown.
+		if !backgroundUntouched(err) {
 			fmt.Fprintln(env.Stderr, "The deletion may have started anyway: check the library in a few minutes before running the command again.")
 		}
 		return code
@@ -412,18 +465,35 @@ func deleteInBackground(ctx context.Context, env Env, sess *session, out io.Writ
 	return ExitOK
 }
 
-// refusedBeforeDeleting reports an answer that proves the request deleted
-// nothing: the dashboard checks the key, the scope and the body (401, 403,
-// 422, 429) before it deletes anything. After any other failure (no answer,
-// a 5xx, Ctrl-C mid-request) it may have.
-func refusedBeforeDeleting(err error) bool {
+// keysUntouched reports a failure that proves a keys request deleted
+// nothing: a 4xx to its only attempt, as the dashboard checks the key, the
+// scope and the body before it deletes anything. Keys requests are repeated
+// after a lost answer, so after several attempts an earlier one may have
+// deleted; after no answer, a 5xx or Ctrl-C mid-request, the request may have.
+func keysUntouched(err error) bool {
 	var apiErr *api.Error
-	return errors.As(err, &apiErr) && apiErr.StatusCode < http.StatusInternalServerError
+	return errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 && apiErr.Attempts <= 1
+}
+
+// backgroundUntouched reports a failure that proves no background deletion
+// started: a 4xx, or no connection at all. These requests are repeated only
+// after failures that prove nothing started (see api.DeleteFolderAssets), so
+// earlier attempts did not start one either.
+func backgroundUntouched(err error) bool {
+	var apiErr *api.Error
+	var netErr *api.NetworkError
+	switch {
+	case errors.As(err, &apiErr):
+		return apiErr.StatusCode >= 400 && apiErr.StatusCode < 500
+	case errors.As(err, &netErr):
+		return !netErr.MaybeCommitted
+	}
+	return false
 }
 
 // deleteError prints a failed delete call and returns its exit code.
 func deleteError(env Env, sess *session, err error) int {
-	msg := sess.redact.Error(err)
+	msg := shown(sess.redact, err.Error())
 	var apiErr *api.Error
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -440,8 +510,8 @@ func deleteError(env Env, sess *session, err error) int {
 }
 
 // siteDomain reads a website's domain the way the dashboard does: the host of
-// a URL or of a bare domain, in lower case and without "www.". It returns ""
-// when there is none.
+// a URL or of a bare domain, in lower case and without one "www.". It returns
+// "" when there is none.
 func siteDomain(s string) string {
 	s = strings.TrimSpace(s)
 	if !strings.Contains(s, "://") {
@@ -464,9 +534,10 @@ func images(n int64) string {
 	return fmt.Sprintf("%d images", n)
 }
 
-// shownText quotes s when it holds control characters, which a terminal
-// would otherwise act on.
-func shownText(s string) string {
+// shown readies text for the terminal: the known API keys hidden, and quoted
+// when it holds control characters, which a terminal would otherwise act on.
+func shown(red redact.Redactor, s string) string {
+	s = red.String(s)
 	if strings.ContainsFunc(s, unicode.IsControl) {
 		return strconv.Quote(s)
 	}

@@ -441,13 +441,14 @@ printf '%s\n' KEY1 KEY2 | optimole delete --keys - --yes   # in a script: no que
 ```
 
 Deleting needs a full-access API key; folder-scoped keys cannot delete. There are no approval codes: before
-deleting, the command says what it will delete and asks you to type the folder's path, the website's domain, or
-`delete` for keys. Any other answer, Ctrl-C or Ctrl-D deletes nothing. `--yes` skips the question; without a
-terminal to ask on (in a script, or with `--keys -`, where stdin carries the keys) the command refuses to run
-without `--yes`.
+deleting, the command says what it will delete and asks you to type the folder's path (its name, for a path
+longer than a terminal line holds), the website's domain, or `delete` for keys, then Enter. Any other answer,
+Ctrl-C or Ctrl-D deletes nothing. `--yes` skips the question; without a terminal to ask on (in a script, or with
+`--keys -`, where stdin carries the keys) the command refuses to run without `--yes`.
 
 Folders and websites are kept. A folder is looked up first (`GET /api/folders`), so an unknown folder, or a path
-two folders share, is refused before anything is deleted; name the folder with `--folder-id` then.
+two folders share, is refused before anything is deleted; name the folder with `--folder-id` then. A path is only
+matched against the whole folder list: if the list does not come back whole, the command stops.
 
 - **Keys** are sent 100 per request (`DELETE /api/assets` with `{"keys": [...]}`) and deleted at once. The server
   checks every key of a request first: if one is not the account's, it refuses the whole request (`422`, naming

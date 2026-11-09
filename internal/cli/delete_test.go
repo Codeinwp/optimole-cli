@@ -147,7 +147,7 @@ func TestDeleteKeysStopsAtTheFirstFailure(t *testing.T) {
 			if code := h.run(args...); code != ExitFailure {
 				t.Fatalf("exit %d", code)
 			}
-			if want := "Deleted 100 of 250 images before it stopped; the next 100 may be deleted too (their request failed), the other 50 were not."; !strings.Contains(h.stderr.String(), want) {
+			if want := "Deleted 100 of 250 images before it stopped; 100 more may be deleted too (the request failed), the other 50 were not."; !strings.Contains(h.stderr.String(), want) {
 				t.Errorf("stderr lacks %q:\n%s", want, h.stderr.String())
 			}
 			if !jsonOut {
@@ -264,7 +264,8 @@ func TestDeleteSite(t *testing.T) {
 	if len(l) != 1 || l[0]["scope"] != "site" || l[0]["domain"] != "example.com" || l[0]["deleting"] != float64(2) {
 		t.Fatalf("lines = %v", l)
 	}
-	if req := deleteRequests(h); len(req) != 1 || req[0].Domain != "example.com" {
+	// Sent as given: the server reads it the way the prompt showed it.
+	if req := deleteRequests(h); len(req) != 1 || req[0].Domain != "https://WWW.Example.com/blog" {
 		t.Fatalf("requests = %+v", req)
 	}
 	if n := len(h.srv.Events()); n != 1 {
@@ -585,5 +586,196 @@ func TestDeleteInterruptedBetweenRequests(t *testing.T) {
 	}
 	if n := len(deleteRequests(h)); n != 1 {
 		t.Errorf("%d requests, want 1", n)
+	}
+}
+
+// TestDeleteSiteStripsOneWWW: the server strips one "www.", as the prompt
+// does, so "www.www.example.com" is the website www.example.com, never
+// example.com.
+func TestDeleteSiteStripsOneWWW(t *testing.T) {
+	h := newHarness(t).withKey()
+	h.srv.AddSite("example.com")
+	h.srv.AddSite("www.example.com")
+	h.srv.AddAsset(testserver.Asset{Filename: "a.jpg", Domain: "example.com"})
+	h.srv.AddAsset(testserver.Asset{Filename: "b.jpg", Domain: "www.example.com"})
+	h.tty = true
+	h.stdin = strings.NewReader("www.example.com\n")
+	if code := h.run("delete", "--site", "www.www.example.com"); code != ExitOK || !strings.Contains(h.stderr.String(), "every image of the website www.example.com,") {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	deleted := h.srv.Deleted()
+	if len(deleted) != 1 {
+		t.Fatalf("deleted = %v", deleted)
+	}
+	for _, a := range h.srv.Assets() {
+		if a.Deleted && a.Domain != "www.example.com" {
+			t.Fatalf("deleted an image of %s", a.Domain)
+		}
+	}
+}
+
+// TestDeleteNeedsEnter: an answer that ends without Enter (Ctrl-D after
+// typing it, or a line too long to read whole) deletes nothing.
+func TestDeleteNeedsEnter(t *testing.T) {
+	h := newHarness(t).withKey()
+	file := keysFile(t, addAssets(h, 1)...)
+	for _, answer := range []string{"delete", "delete" + strings.Repeat(" ", maxKeyInput)} {
+		h.tty = true
+		h.stdin = strings.NewReader(answer)
+		if code := h.run("delete", "--keys", file); code != ExitFailure || !strings.Contains(h.stderr.String(), "the answer did not match; nothing was deleted") {
+			t.Fatalf("answer of %d bytes: exit %d: %s", len(answer), code, h.stderr.String())
+		}
+	}
+	if n := len(deleteRequests(h)); n != 0 {
+		t.Fatalf("%d delete requests", n)
+	}
+}
+
+// TestDeleteLongFolderPathAsksForTheName: a path longer than a terminal line
+// cannot be typed, so its name is asked for instead.
+func TestDeleteLongFolderPathAsksForTheName(t *testing.T) {
+	h := newHarness(t).withKey()
+	segs := make([]string, 17)
+	for i := range segs {
+		segs[i] = strings.Repeat(string(rune('a'+i)), 255)
+	}
+	long := strings.Join(segs, "/")
+	folder := h.srv.AddFolder(long)
+	h.tty = true
+	h.stdin = strings.NewReader(segs[16] + "\n")
+	if code := h.run("delete", "--folder-id", fmt.Sprint(folder)); code != ExitOK {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), fmt.Sprintf("Type %q to confirm: ", segs[16])) {
+		t.Fatalf("stderr: %s", h.stderr.String())
+	}
+	if n := len(deleteRequests(h)); n != 1 {
+		t.Fatalf("%d delete requests", n)
+	}
+}
+
+// TestDeleteRetriedKeysMayBeDeleted: a keys request whose first answer was
+// lost may have deleted, whatever the retries answered after it.
+func TestDeleteRetriedKeysMayBeDeleted(t *testing.T) {
+	h := newHarness(t).withKey()
+	keys := addAssets(h, 1)
+	tooMany := testserver.Response{Status: 429, Body: `{"message":"Too Many Attempts."}`}
+	h.srv.Inject(testserver.RouteDeleteAssets, testserver.Response{CommitThenClose: true}, tooMany, tooMany, tooMany)
+	if code := h.run("delete", "--keys", keysFile(t, keys...), "--yes", "--json"); code != ExitFailure {
+		t.Fatalf("exit %d", code)
+	}
+	if msg := h.stderr.String(); !strings.Contains(msg, "1 of 1 image may be deleted (the request failed).") || strings.Contains(msg, "Nothing was deleted") {
+		t.Errorf("stderr:\n%s", msg)
+	}
+	if l := h.jsonLines(); len(l) != 1 || l[0]["deleted"] != float64(0) || l[0]["maybe_deleted"] != float64(1) {
+		t.Errorf("lines = %v", l)
+	}
+	if n := len(h.srv.Deleted()); n != 1 {
+		t.Fatalf("%d deleted: the first attempt did delete", n)
+	}
+}
+
+// refusingTransport fails every request before it connects.
+type refusingTransport struct{}
+
+func (refusingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("dial tcp: connection refused")
+}
+
+func TestDeleteInBackgroundOutcomes(t *testing.T) {
+	t.Run("an answer that does not read", func(t *testing.T) {
+		// The server accepted it, so the deletion runs.
+		h := newHarness(t).withKey()
+		h.srv.AddSite("example.com")
+		h.srv.Inject(testserver.RouteDeleteAssets, testserver.Response{Status: 202, Body: `{"assets":`})
+		if code := h.run("delete", "--site", "example.com", "--yes"); code != ExitFailure || !strings.Contains(h.stderr.String(), "The deletion may have started anyway") {
+			t.Fatalf("exit %d: %s", code, h.stderr.String())
+		}
+	})
+	t.Run("never connected", func(t *testing.T) {
+		h := newHarness(t).withKey()
+		env := h.env()
+		env.Transport = refusingTransport{}
+		code := Run(context.Background(), []string{"delete", "--site", "example.com", "--yes"}, env)
+		if code != ExitFailure || !strings.Contains(h.stderr.String(), "connection refused") || strings.Contains(h.stderr.String(), "may have started") {
+			t.Fatalf("exit %d: %s", code, h.stderr.String())
+		}
+	})
+	t.Run("a 5xx", func(t *testing.T) {
+		h := newHarness(t).withKey()
+		h.srv.AddSite("example.com")
+		h.srv.Inject(testserver.RouteDeleteAssets, testserver.Response{Status: 504, Body: `{"message":"Gateway Timeout"}`})
+		if code := h.run("delete", "--site", "example.com", "--yes"); code != ExitFailure || !strings.Contains(h.stderr.String(), "The deletion may have started anyway") {
+			t.Fatalf("exit %d: %s", code, h.stderr.String())
+		}
+		if n := len(deleteRequests(h)); n != 1 {
+			t.Fatalf("%d requests: a 504 is not repeated", n)
+		}
+	})
+}
+
+// TestDeleteHidesKeysAndControlCharacters: whatever is printed (the folder
+// asked for, the folder found, the prompt, the JSON, the server's message)
+// shows no known API key and no raw control character.
+func TestDeleteHidesKeysAndControlCharacters(t *testing.T) {
+	const key = "optml-very-secret-key-for-delete-77"
+	h := newHarness(t)
+	h.vars[config.EnvAPIKey] = key
+	h.srv.AddKey(key, testserver.Key{})
+	folder := h.srv.AddFolder("Shared/" + key)
+	check := func(what string) {
+		t.Helper()
+		if all := h.stdout.String() + h.stderr.String(); strings.Contains(all, key) || strings.Contains(all, "\x1b") {
+			t.Errorf("%s printed a key or an escape:\n%q", what, all)
+		}
+	}
+	h.run("delete", "--folder", key, "--yes")
+	check("a folder not found")
+	if !strings.Contains(h.stderr.String(), `no folder has the path "[REDACTED]"`) {
+		t.Errorf("stderr: %s", h.stderr.String())
+	}
+	h.tty = true
+	h.stdin = strings.NewReader("Shared/[REDACTED]\n")
+	if code := h.run("delete", "--folder-id", fmt.Sprint(folder)); code != ExitFailure {
+		t.Errorf("a redacted answer was taken: exit %d", code)
+	}
+	check("the prompt")
+	h.tty = false
+	if code := h.run("delete", "--folder-id", fmt.Sprint(folder), "--yes", "--json"); code != ExitOK {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	check("the JSON")
+	if l := h.jsonLines(); len(l) != 1 || l[0]["folder"] != "Shared/[REDACTED]" {
+		t.Errorf("lines = %v", l)
+	}
+	h.run("delete", "--keys", filepath.Join(t.TempDir(), "\x1b[2Jmissing.txt"), "--yes")
+	check("a keys file that does not open")
+	h.srv.Inject(testserver.RouteDeleteAssets, testserver.Response{Status: 422, Body: `{"message":"Bad \u001b[2J folder"}`})
+	h.run("delete", "--folder-id", fmt.Sprint(folder), "--yes")
+	check("the server's message")
+	if !strings.Contains(h.stderr.String(), `\x1b[2J`) {
+		t.Errorf("the escape is not shown quoted: %q", h.stderr.String())
+	}
+}
+
+// TestDeleteFolderNeedsTheWholeList: a path two folders share could hide in
+// the part of the list that did not come back, so it is not guessed.
+func TestDeleteFolderNeedsTheWholeList(t *testing.T) {
+	h := newHarness(t).withKey()
+	page := `{"data":[{"id":5,"name":"Brand","parent_id":null,"status":"active","is_default":false}],"meta":{"next_cursor":%s,"has_more":true}}`
+	for _, next := range []string{`null`, `"same"`} {
+		h.srv.Inject(testserver.RouteFolders, testserver.Response{Status: 200, Body: fmt.Sprintf(page, next)}, testserver.Response{Status: 200, Body: fmt.Sprintf(page, next)})
+		if code := h.run("delete", "--folder", "Brand", "--yes"); code != ExitFailure || !strings.Contains(h.stderr.String(), "the folder list came back incomplete") {
+			t.Fatalf("next cursor %s: exit %d: %s", next, code, h.stderr.String())
+		}
+	}
+	// An ID is unique: found in what came back, it is the folder.
+	h.srv.Inject(testserver.RouteFolders, testserver.Response{Status: 200, Body: fmt.Sprintf(page, `null`)})
+	h.srv.Inject(testserver.RouteDeleteAssets, testserver.Response{Status: 202, Body: `{"assets":0}`})
+	if code := h.run("delete", "--folder-id", "5", "--yes"); code != ExitOK {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	if n := len(deleteRequests(h)); n != 1 {
+		t.Fatalf("%d delete requests", n)
 	}
 }
