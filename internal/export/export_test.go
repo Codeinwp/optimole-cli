@@ -104,6 +104,29 @@ func (f *fixture) downloads() []testserver.Event {
 	return out
 }
 
+// partSizes maps each archive of example.com that has a partial file
+// ("images-1.zip") to that file's size. It reads the size through an open
+// file, which is current on every platform even while a download still
+// writes to it.
+func (f *fixture) partSizes() map[string]int64 {
+	out := map[string]int64{}
+	paths, _ := filepath.Glob(filepath.Join(f.dir, "example.com", "*"+partSuffix))
+	for _, p := range paths {
+		name := filepath.Base(p)
+		i := strings.Index(name, ".zip.")
+		file, err := os.Open(p)
+		if i < 0 || err != nil {
+			continue
+		}
+		st, err := file.Stat()
+		file.Close()
+		if err == nil {
+			out[name[:i+len(".zip")]] = st.Size()
+		}
+	}
+	return out
+}
+
 func TestRunDownloadsArchivesWhileTheExportRuns(t *testing.T) {
 	f := newFixture(t)
 	a1, a2, d1 := zipOf(t, "example.com/a.jpg"), zipOf(t, "example.com/b.jpg"), zipOf(t, "c.png")
@@ -759,28 +782,39 @@ func TestRunResumesDownloadsCancelledMidway(t *testing.T) {
 	a, b := zipOf(t, "a"), zipOf(t, "b")
 	id := f.srv.AddExport(api.ExportCompleted, testserver.ExportDomain{Domain: "example.com", Archives: [][]byte{a, b}})
 	f.srv.Inject(testserver.RouteDownload, testserver.Response{StallAfter: 30}, testserver.Response{StallAfter: 40})
-	ctx, cancel := context.WithCancel(context.Background())
-	stalled := 0
-	f.srv.Hook = func(route testserver.Route, _ *http.Request) {
-		if route == testserver.RouteDownload {
-			f.mu.Lock()
-			stalled++
-			if stalled == 2 {
-				time.AfterFunc(100*time.Millisecond, cancel)
-			}
-			f.mu.Unlock()
-		}
+	// Whichever archive starts first stalls after 30 bytes, the other after
+	// 40. The run is cancelled once both partial files hold those bytes,
+	// however long the downloads take to get there.
+	stalled := func(parts map[string]int64) bool {
+		one, two := parts["images-1.zip"], parts["images-2.zip"]
+		return len(parts) == 2 && (one == 30 && two == 40 || one == 40 && two == 30)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ran := make(chan struct{})
+	go func() {
+		defer cancel()
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && !stalled(f.partSizes()); {
+			select {
+			case <-ran:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}()
 	out := f.run(ctx, id)
+	close(ran)
 	if !errors.Is(out.Err, context.Canceled) || out.Failed != 0 || out.Downloaded != 0 {
 		t.Fatalf("cancelled run: %+v", out)
 	}
-	parts, _ := filepath.Glob(filepath.Join(f.dir, "example.com", "*"+partSuffix))
-	if len(parts) != 2 {
+	parts := f.partSizes()
+	if !stalled(parts) {
 		t.Fatalf("partial files: %v", parts)
 	}
 
-	f.srv.Hook = nil
+	// The fake files the cancelled downloads only once it notices the
+	// client left, which can be after Run returned.
+	f.srv.WaitIdle(t)
 	before := len(f.downloads())
 	out = f.run(context.Background(), id)
 	if out.Err != nil || out.Downloaded != 2 {
@@ -789,9 +823,14 @@ func TestRunResumesDownloadsCancelledMidway(t *testing.T) {
 	if !bytes.Equal(f.file("example.com/images-1.zip"), a) || !bytes.Equal(f.file("example.com/images-2.zip"), b) {
 		t.Error("resumed archives differ")
 	}
-	for _, d := range f.downloads()[before:] {
-		if d.Range != "bytes=30-" && d.Range != "bytes=40-" {
-			t.Errorf("resume without the right range: %+v", d)
+	resumed := f.downloads()[before:]
+	if len(resumed) != 2 {
+		t.Fatalf("resumed downloads: %+v", resumed)
+	}
+	for _, d := range resumed {
+		archive := "images-" + d.Key[strings.LastIndex(d.Key, "/")+1:] + ".zip"
+		if want := fmt.Sprintf("bytes=%d-", parts[archive]); d.Range != want {
+			t.Errorf("%s resumed with Range %q, want %q: %+v", archive, d.Range, want, d)
 		}
 	}
 }
