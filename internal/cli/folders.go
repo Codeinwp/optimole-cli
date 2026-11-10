@@ -69,24 +69,9 @@ func runFolders(ctx context.Context, args []string, env Env) int {
 		return ExitUsage
 	}
 
-	var folders []api.Folder
-	q := api.FolderQuery{ParentID: parent, PerPage: foldersPerPage}
-	seen := map[string]bool{}
-	for page := 0; page < maxFolderPages; page++ {
-		res, err := sess.client.ListFolders(ctx, q)
-		if err != nil {
-			return foldersError(env, sess, err)
-		}
-		folders = append(folders, res.Data...)
-		next := ""
-		if res.Meta.NextCursor != nil {
-			next = *res.Meta.NextCursor
-		}
-		if !res.Meta.HasMore || next == "" || seen[next] {
-			break
-		}
-		seen[next] = true
-		q.Cursor = next
+	folders, _, err := listAllFolders(ctx, sess.client, parent)
+	if err != nil {
+		return foldersError(env, sess, err)
 	}
 
 	lines := make([]folderLine, 0, len(folders))
@@ -138,6 +123,35 @@ func runFolders(ctx context.Context, args []string, env Env) int {
 		return outputFailed(env, err)
 	}
 	return ExitOK
+}
+
+// listAllFolders returns every active folder, or with parent ("root" or a
+// folder ID) that folder's children, following the cursor pages. complete is
+// false when the pages stopped before the list did: at the page limit, or at
+// a cursor missing or seen before.
+func listAllFolders(ctx context.Context, client *api.Client, parent string) (folders []api.Folder, complete bool, err error) {
+	q := api.FolderQuery{ParentID: parent, PerPage: foldersPerPage}
+	seen := map[string]bool{}
+	for page := 0; page < maxFolderPages; page++ {
+		res, err := client.ListFolders(ctx, q)
+		if err != nil {
+			return nil, false, err
+		}
+		folders = append(folders, res.Data...)
+		if !res.Meta.HasMore {
+			return folders, true, nil
+		}
+		next := ""
+		if res.Meta.NextCursor != nil {
+			next = *res.Meta.NextCursor
+		}
+		if next == "" || seen[next] {
+			break
+		}
+		seen[next] = true
+		q.Cursor = next
+	}
+	return folders, false, nil
 }
 
 func foldersError(env Env, sess *session, err error) int {

@@ -42,8 +42,8 @@ const logoutUsage = `Usage:
 Deletes the API key saved by "optimole login".
 `
 
-// maxKeyInput caps how much of stdin is read for a key; maxKeyLength is the
-// longest key accepted.
+// maxKeyInput caps how much of stdin is read for a key (or for the answer to
+// a prompt); maxKeyLength is the longest key accepted.
 const (
 	maxKeyInput  = 4096
 	maxKeyLength = 512
@@ -140,7 +140,7 @@ func readKey(ctx context.Context, env Env) (string, error) {
 			fmt.Fprintln(env.Stderr, "warning: input cannot be hidden on this terminal; the key will be visible as you type.")
 		}
 		fmt.Fprint(env.Stderr, "Optimole API key: ")
-		line, err = readKeyLine(ctx, f, false)
+		line, err = readOneLine(ctx, f, false, "the key")
 		if restore != nil {
 			restore()
 			fmt.Fprintln(env.Stderr)
@@ -150,7 +150,7 @@ func readKey(ctx context.Context, env Env) (string, error) {
 		}
 	} else {
 		var err error
-		if line, err = readKeyLine(ctx, env.Stdin, true); err != nil {
+		if line, err = readOneLine(ctx, env.Stdin, true, "the key"); err != nil {
 			return "", err
 		}
 	}
@@ -166,11 +166,11 @@ func readKey(ctx context.Context, env Env) (string, error) {
 	return key, nil
 }
 
-// readKeyLine reads one line (with skipBlank, the first non-blank one) from
-// r, reading at most maxKeyInput bytes. A read cannot be interrupted, so when
-// ctx is done it returns at once and leaves the read behind; the process is
-// about to exit.
-func readKeyLine(ctx context.Context, r io.Reader, skipBlank bool) (string, error) {
+// readOneLine reads one line (with skipBlank, the first non-blank one) from
+// r, reading at most maxKeyInput bytes; what names the line in errors. A read
+// cannot be interrupted, so when ctx is done it returns at once and leaves the
+// read behind; the process is about to exit.
+func readOneLine(ctx context.Context, r io.Reader, skipBlank bool, what string) (string, error) {
 	type result struct {
 		line string
 		err  error
@@ -188,7 +188,7 @@ func readKeyLine(ctx context.Context, r io.Reader, skipBlank bool) (string, erro
 				}
 			}
 			if err != nil {
-				ch <- result{"", fmt.Errorf("reading the key: %w", err)}
+				ch <- result{"", fmt.Errorf("reading %s: %w", what, err)}
 				return
 			}
 			if !skipBlank || strings.TrimSpace(line) != "" || !strings.HasSuffix(line, "\n") {

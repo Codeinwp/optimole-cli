@@ -16,6 +16,7 @@ import (
 	"github.com/Codeinwp/optimole-cli/internal/api"
 	"github.com/Codeinwp/optimole-cli/internal/config"
 	"github.com/Codeinwp/optimole-cli/internal/redact"
+	"github.com/Codeinwp/optimole-cli/internal/termecho"
 )
 
 // Exit codes.
@@ -48,6 +49,18 @@ type Env struct {
 	Transport http.RoundTripper
 	// Sleep, when set, replaces the wait between retries.
 	Sleep func(ctx context.Context, d time.Duration) error
+	// StdinIsTerminal, when set, replaces the check that stdin is an
+	// interactive terminal (tests use it to answer the delete prompt).
+	StdinIsTerminal func() bool
+}
+
+// interactive reports whether stdin is an interactive terminal.
+func (e Env) interactive() bool {
+	if e.StdinIsTerminal != nil {
+		return e.StdinIsTerminal()
+	}
+	f, ok := e.Stdin.(*os.File)
+	return ok && termecho.IsTerminal(f)
 }
 
 // DefaultEnv is the real process environment.
@@ -62,8 +75,8 @@ func DefaultEnv(build BuildInfo) Env {
 	}
 }
 
-const mainUsage = `optimole uploads local files into an Optimole media library, exports it, and
-builds the CDN URLs of its images.
+const mainUsage = `optimole uploads local files into an Optimole media library, exports it,
+builds the CDN URLs of its images, and deletes them.
 
 Usage:
   optimole <command> [flags] [arguments]
@@ -73,6 +86,7 @@ Commands:
   folders    List the library's folders
   export     Export the library as ZIP archives and download them
   url        Print an asset's CDN URL, resized or converted
+  delete     Delete images by key, or every image of a folder or a website
   login      Save an API key (read from stdin)
   logout     Delete the saved API key
   version    Print the version
@@ -96,6 +110,8 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return runExport(ctx, rest, env)
 	case "url":
 		return runURL(ctx, rest, env)
+	case "delete":
+		return runDelete(ctx, rest, env)
 	case "login":
 		return runLogin(ctx, rest, env)
 	case "logout":

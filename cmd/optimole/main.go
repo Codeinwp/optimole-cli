@@ -1,5 +1,6 @@
-// Command optimole uploads local files into an Optimole media library and
-// exports the library as ZIP archives.
+// Command optimole uploads local files into an Optimole media library,
+// exports the library as ZIP archives, builds the CDN URLs of its images, and
+// deletes them.
 package main
 
 import (

@@ -1,7 +1,7 @@
 // Package api is a small client for the parts of the Optimole dashboard API
 // the CLI uses: reserving an asset, sending its bytes to the presigned storage
-// URL, completing it, looking an asset up, listing folders, and running asset
-// exports and downloading their archives.
+// URL, completing it, looking an asset up, deleting assets, listing folders,
+// and running asset exports and downloading their archives.
 package api
 
 import (
@@ -362,12 +362,12 @@ const (
 	// retryIdempotent is for calls that are safe to repeat (listing,
 	// completion): 429, 502, 503, 504 and any network error.
 	retryIdempotent retryMode = iota
-	// retryUncommitted is for asset creation, where a repeat reserves a
-	// second asset. Only failures that prove nothing was reserved are
-	// retried: 429 (refused before the action), 503 with
-	// upload_service_unavailable (the server deletes the reservation before
-	// answering), and connection errors before the request was sent (DNS,
-	// dial, TLS handshake).
+	// retryUncommitted is for calls a repeat would do twice, or answer
+	// differently: asset creation (a second reservation), starting an export,
+	// deleting assets (a deleted key is refused). Only failures that prove nothing was done are retried: 429
+	// (refused before the action), 503 with upload_service_unavailable (the
+	// server deletes the reservation before answering), and connection
+	// errors before the request was sent (DNS, dial, TLS handshake).
 	retryUncommitted
 )
 
