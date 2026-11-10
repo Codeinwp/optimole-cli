@@ -171,6 +171,10 @@ type Server struct {
 	violations  []string
 	inflightPut int
 	maxPut      int
+	// active counts the requests being handled; idle is closed once it
+	// drops to zero (see WaitIdle).
+	active int
+	idle   chan struct{}
 
 	exports        map[int64]*fakeExport
 	nextExport     int64
@@ -196,14 +200,14 @@ func New(t testing.TB) *Server {
 	api.HandleFunc("/api/folders", s.handleFolders)
 	api.HandleFunc("/api/asset-exports", s.handleExports)
 	api.HandleFunc("/api/asset-exports/", s.handleExport)
-	s.API = httptest.NewServer(api)
-	s.S3 = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.API = httptest.NewServer(s.track(api))
+	s.S3 = httptest.NewServer(s.track(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/exports/") {
 			s.handleDownload(w, r)
 			return
 		}
 		s.handlePut(w, r)
-	}))
+	})))
 	s.URL = s.API.URL + "/api"
 	t.Cleanup(func() {
 		s.API.Close()
@@ -268,6 +272,47 @@ func (s *Server) Events() []Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Event(nil), s.events...)
+}
+
+// WaitIdle waits until no request is being handled, so Events holds every
+// request whose handler has started. A request is filed when its handler
+// ends, and the handler of a request the client gave up on (a stalled
+// download, say) ends only once the fake notices, which can be after the
+// client has moved on. The test fails if requests are still being handled
+// after 10 seconds.
+func (s *Server) WaitIdle(t testing.TB) {
+	t.Helper()
+	s.mu.Lock()
+	active, idle := s.active, s.idle
+	s.mu.Unlock()
+	if active == 0 {
+		return
+	}
+	select {
+	case <-idle:
+	case <-time.After(10 * time.Second):
+		t.Fatal("testserver: requests still being handled after 10s")
+	}
+}
+
+// track counts the requests next is handling, for WaitIdle.
+func (s *Server) track(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		if s.active == 0 {
+			s.idle = make(chan struct{})
+		}
+		s.active++
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			if s.active--; s.active == 0 {
+				close(s.idle)
+			}
+			s.mu.Unlock()
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Count returns how many requests reached a route.
